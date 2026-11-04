@@ -1,0 +1,702 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""
+tests/test_compliance_bridge.py
+
+Pytest tests for the Python compliance bridge (src/compliance_bridge/).
+
+Covers:
+  - OSCAL YAML parsing (valid + invalid inputs)
+  - Pydantic model construction (OscalFinding, ComplianceMetrics)
+  - FastAPI endpoint behaviour (/health, /v1/metrics/*)
+  - Langfuse SDK calls are mocked throughout
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+
+# Ensure src/ is on the path so `compliance_bridge` is importable
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+import pytest
+
+pytestmark = pytest.mark.unit
+
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from fastapi.testclient import TestClient
+
+# ---------------------------------------------------------------------------
+# ── OSCAL parser ──
+# NOTE: OscalFinding and ComplianceMetrics Pydantic model tests have been
+# consolidated into tests/test_governance_contracts_runtime.py (TestOscalFindingModel
+# and TestComplianceMetricsModel classes) to avoid duplication.
+# ---------------------------------------------------------------------------
+
+# Minimal valid OSCAL YAML that matches `lula validate` output
+VALID_OSCAL_YAML = """
+assessment-results:
+  uuid: "test-uuid-001"
+  metadata:
+    last-modified: "2026-03-01T00:00:00Z"
+  results:
+    - uuid: "result-uuid-001"
+      findings:
+        - uuid: "finding-uuid-001"
+          title: "A.5.2 validation"
+          remarks: "NeMo output rails are active"
+          target:
+            type: objective-id
+            target-id: "A.5.2"
+            status:
+              state: "satisfied"
+          props:
+            - name: safety_rate
+              value: "0.995"
+            - name: evidence_age_seconds
+              value: "3600"
+        - uuid: "finding-uuid-002"
+          title: "A.9.2 validation"
+          target:
+            type: objective-id
+            target-id: "A.9.2"
+            status:
+              state: "not-satisfied"
+"""
+
+INVALID_OSCAL_YAML = """
+this: is
+  not: valid yaml: because: of: bad: indentation:
+  :::
+"""
+
+MISSING_RESULTS_YAML = """
+assessment-results:
+  uuid: "no-results"
+  results: []
+"""
+
+NO_FINDINGS_YAML = """
+assessment-results:
+  uuid: "no-findings"
+  results:
+    - uuid: "result-001"
+      findings: []
+"""
+
+
+class TestParseOscalYaml:
+    """Tests for src/compliance_bridge/oscal_parser.parse_oscal_yaml()."""
+
+    def test_parse_valid_yaml(self):
+        from src.compliance_bridge.oscal_parser import parse_oscal_yaml
+
+        findings = parse_oscal_yaml(VALID_OSCAL_YAML)
+
+        assert isinstance(findings, list)
+        assert len(findings) == 2
+
+        a52 = next(f for f in findings if f.control_id == "A.5.2")
+        assert a52.result == "PASS"
+        assert a52.safety_rate == pytest.approx(0.995)
+        assert a52.evidence_age_s == pytest.approx(3600.0)
+        assert a52.finding_id == "finding-uuid-001"
+
+        a92 = next(f for f in findings if f.control_id == "A.9.2")
+        assert a92.result == "FAIL"
+
+    def test_parse_invalid_yaml_raises(self):
+        from src.compliance_bridge.oscal_parser import parse_oscal_yaml
+
+        with pytest.raises(
+            ValueError, match="YAML syntax error|does not match|zero valid"
+        ):
+            parse_oscal_yaml(INVALID_OSCAL_YAML)
+
+    def test_parse_missing_results_raises(self):
+        from src.compliance_bridge.oscal_parser import parse_oscal_yaml
+
+        with pytest.raises(ValueError, match="no result entries"):
+            parse_oscal_yaml(MISSING_RESULTS_YAML)
+
+    def test_parse_no_findings_raises(self):
+        from src.compliance_bridge.oscal_parser import parse_oscal_yaml
+
+        with pytest.raises(ValueError, match="zero valid findings"):
+            parse_oscal_yaml(NO_FINDINGS_YAML)
+
+    def test_state_mapping_not_satisfied(self):
+        from src.compliance_bridge.oscal_parser import parse_oscal_yaml
+
+        yaml_str = """
+assessment-results:
+  uuid: "t"
+  results:
+    - uuid: "r"
+      findings:
+        - uuid: "f1"
+          target:
+            target-id: "SC-4"
+            status:
+              state: "not-satisfied"
+"""
+        findings = parse_oscal_yaml(yaml_str)
+        assert findings[0].result == "FAIL"
+
+    def test_state_mapping_satisfied(self):
+        from src.compliance_bridge.oscal_parser import parse_oscal_yaml
+
+        yaml_str = """
+assessment-results:
+  uuid: "t"
+  results:
+    - uuid: "r"
+      findings:
+        - uuid: "f1"
+          target:
+            target-id: "A.5.3"
+            status:
+              state: "satisfied"
+"""
+        findings = parse_oscal_yaml(yaml_str)
+        assert findings[0].result == "PASS"
+
+
+# ---------------------------------------------------------------------------
+# ── FastAPI endpoints ──
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="function")
+def client():
+    """
+    TestClient for the FastAPI app.
+
+    Langfuse is patched at import time so no real credentials are needed.
+    The ``require_internal_token`` dependency (C-07) is overridden to return
+    a fixed sentinel so tests are not blocked by auth and can focus on
+    business-logic assertions.  A separate ``TestAuditIngestAuth`` class
+    exercises the auth behaviour directly.
+
+    scope="function": kept function-scoped because TestAuditIngestAuth creates
+    its own TestClient instances inside patch.dict contexts, and requires that
+    the app.dependency_overrides dict is clean (no auth bypass) at that point.
+    Widening to module-scope would leave the override active across the class
+    boundary, silently bypassing C-07 auth in the auth-specific tests.
+    """
+    with patch("src.compliance_bridge.main.Langfuse") as MockLangfuse:
+        mock_lf = MagicMock()
+        MockLangfuse.return_value = mock_lf
+
+        from src.compliance_bridge.auth import require_internal_token
+        from src.compliance_bridge.main import app
+
+        # Override auth so business-logic tests are not blocked by C-07.
+        app.dependency_overrides[require_internal_token] = lambda: "test-token"
+        try:
+            with TestClient(app, raise_server_exceptions=True) as c:
+                yield c
+        finally:
+            app.dependency_overrides.pop(require_internal_token, None)
+
+
+class TestHealthEndpoint:
+    def test_health_returns_ok(self, client):
+        response = client.get("/health")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ok"
+        assert data["service"] == "compliance-bridge"
+        assert data["version"] == "0.1.0"
+
+
+class TestMetricsEndpoint:
+    def test_unsupported_control_returns_400(self, client):
+        response = client.get("/v1/metrics/UNKNOWN-CONTROL")
+        assert response.status_code == 400
+        data = response.json()
+        # FastAPI wraps HTTPException detail
+        detail = data.get("detail", data)
+        if isinstance(detail, dict):
+            assert detail.get("error") == "UNSUPPORTED_CONTROL"
+        else:
+            assert "UNSUPPORTED_CONTROL" in str(data)
+
+    def test_supported_control_calls_get_compliance_metrics(self, client):
+        from datetime import datetime, timezone
+
+        from src.compliance_bridge.types import ComplianceMetrics
+
+        mock_metrics = ComplianceMetrics(
+            control_id="A.5.2",
+            safety_rate=0.99,
+            total_traces=200,
+            blocked_traces=2,
+            passed_traces=198,
+            window_hours=24.0,
+            last_event_utc=datetime.now(tz=timezone.utc).isoformat(),
+            evidence_age_seconds=100.0,
+            startup_grace_active=False,
+            startup_grace_remaining_hours=0.0,
+        )
+
+        with patch(
+            "src.compliance_bridge.main.get_compliance_metrics",
+            new=AsyncMock(return_value=mock_metrics),
+        ):
+            response = client.get("/v1/metrics/A.5.2?window_hours=24")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["control_id"] == "A.5.2"
+        assert data["safety_rate"] == pytest.approx(0.99)
+        assert data["total_traces"] == 200
+
+
+class TestAuditIngestEndpoint:
+    def test_missing_oscal_yaml_returns_400(self, client):
+        response = client.post(
+            "/v1/audit/ingest",
+            json={"oscal_yaml": "  ", "audit_id": "test-001"},
+        )
+        assert response.status_code == 400
+
+    def test_valid_ingest_calls_workflow(self, client):
+        mock_result = {
+            "status": "ok",
+            "audit_id": "test-audit-001",
+            "findings_count": 2,
+            "artifact_key": None,
+            "ingested": 2,
+            "alerted": False,
+            "alert_targets": [],
+            "remediation_sent": False,
+            "remediation_text": None,
+            "advisor_error": None,
+        }
+
+        with patch(
+            "src.compliance_bridge.main.run_audit_workflow",
+            new=AsyncMock(return_value=mock_result),
+        ):
+            response = client.post(
+                "/v1/audit/ingest",
+                json={"oscal_yaml": VALID_OSCAL_YAML, "audit_id": "test-audit-001"},
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ok"
+        assert data["findings_count"] == 2
+
+    def test_invalid_yaml_returns_422(self, client):
+        with patch(
+            "src.compliance_bridge.main.run_audit_workflow",
+            new=AsyncMock(side_effect=ValueError("YAML syntax error: bad yaml")),
+        ):
+            response = client.post(
+                "/v1/audit/ingest",
+                json={"oscal_yaml": "definitely: bad: yaml:", "audit_id": "x"},
+            )
+        assert response.status_code == 422
+
+    def test_background_ingest_schedules_task_and_returns_running(self, client):
+        mock_result = {
+            "status": "ok",
+            "audit_id": "test-audit-bg",
+            "findings_count": 2,
+            "artifact_key": None,
+            "ingested": 2,
+            "alerted": False,
+            "alert_targets": [],
+            "remediation_sent": False,
+            "remediation_text": None,
+            "advisor_error": None,
+        }
+
+        with patch(
+            "src.compliance_bridge.main.run_audit_workflow",
+            new=AsyncMock(return_value=mock_result),
+        ):
+            response = client.post(
+                "/v1/audit/ingest?background=true",
+                json={"oscal_yaml": VALID_OSCAL_YAML, "audit_id": "test-audit-bg"},
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["phase"] == "running"
+        assert data["status"] == "ok"
+        assert data["audit_id"] == "test-audit-bg"
+
+
+class TestAuditIngestAuth:
+    """Verify that C-07 auth is enforced when a token IS configured.
+
+    Uses CAGE_ENV=staging so that:
+    - The auth module enforces the token (only skips in CAGE_ENV=dev).
+    - The KMS batch signer does NOT call assert_kms_active_in_production()
+      (that assertion only fires when CAGE_ENV=prod).
+    - The routing-seal startup check passes (it reads ENVIRONMENT, not CAGE_ENV,
+      and defaults to "development" when unset).
+    """
+
+    # Env vars shared across all auth tests — staging enforces auth without
+    # triggering the KMS production assertion added by C-08.
+    _AUTH_ENV = {
+        "CAGE_INTERNAL_TOKEN": "secret-token",
+        "CAGE_ENV": "staging",
+    }
+
+    @pytest.fixture(autouse=True)
+    def _stub_evidence_custody(self):
+        """Staging enforces evidence custody (real WORM store + KMS signer + verifier).
+
+        Custody fail-closed paths are covered in tests/test_evidence_custodian.py
+        and tests/test_evidence_verifier.py; here stub custodian/verifier let the
+        lifespan reach the auth layer.
+        """
+        custodian = MagicMock()
+        custodian.run_forever = AsyncMock(return_value=None)
+        custodian.aclose = AsyncMock(return_value=None)
+        verifier = MagicMock()
+        verifier.run_forever = AsyncMock(return_value=None)
+        with (
+            patch(
+                "src.compliance_bridge.evidence_custodian.EvidenceCustodian.from_env",
+                return_value=custodian,
+            ),
+            patch(
+                "src.compliance_bridge.evidence_verifier.CustodyVerifier.from_env",
+                return_value=verifier,
+            ),
+        ):
+            yield
+
+    def test_missing_token_returns_401_when_token_configured(self):
+        """Without a bearer token the endpoint must return 401."""
+        with patch("src.compliance_bridge.main.Langfuse") as MockLangfuse:
+            MockLangfuse.return_value = MagicMock()
+            with patch.dict(os.environ, self._AUTH_ENV, clear=False):
+                from src.compliance_bridge.main import app
+
+                with TestClient(app, raise_server_exceptions=True) as c:
+                    response = c.post(
+                        "/v1/audit/ingest",
+                        json={"oscal_yaml": "  ", "audit_id": "auth-test"},
+                    )
+                assert response.status_code == 401
+
+    def test_wrong_token_returns_401(self):
+        """A bearer token that does not match the configured secret must return 401."""
+        with patch("src.compliance_bridge.main.Langfuse") as MockLangfuse:
+            MockLangfuse.return_value = MagicMock()
+            with patch.dict(os.environ, self._AUTH_ENV, clear=False):
+                from src.compliance_bridge.main import app
+
+                with TestClient(app, raise_server_exceptions=True) as c:
+                    response = c.post(
+                        "/v1/audit/ingest",
+                        headers={"Authorization": "Bearer wrong-token"},
+                        json={"oscal_yaml": "  ", "audit_id": "auth-test"},
+                    )
+                assert response.status_code == 401
+
+    def test_correct_token_passes_auth_layer(self):
+        """A valid bearer token must pass auth (business logic then handles the request)."""
+        with patch("src.compliance_bridge.main.Langfuse") as MockLangfuse:
+            MockLangfuse.return_value = MagicMock()
+            with patch.dict(os.environ, self._AUTH_ENV, clear=False):
+                from src.compliance_bridge.main import app
+
+                with TestClient(app, raise_server_exceptions=True) as c:
+                    # Empty oscal_yaml → 400 from business logic, NOT 401 from auth.
+                    response = c.post(
+                        "/v1/audit/ingest",
+                        headers={"X-Cage-Internal-Token": "secret-token"},
+                        json={"oscal_yaml": "  ", "audit_id": "auth-test"},
+                    )
+                assert response.status_code == 400
+
+
+class TestTelemetryHistoryEndpoint:
+    def test_get_history_success(self, client):
+        class MockTraceMeta:
+            page = 1
+            total_pages = 2
+
+        class MockTraceData:
+            def __init__(self):
+                self.id = "trace-123"
+                self.name = "lula-audit"
+                self.tags = ["compliance"]
+                self.metadata = {
+                    "iso_42001_control": "A.5.2",
+                    "lula_result": "PASS",
+                    "safety_rate": "1.0",
+                    "audit_id": "audit-abc",
+                }
+                self.timestamp = "2026-05-21T18:00:00Z"
+
+        class MockTraceListResponse:
+            data = [MockTraceData()]
+            meta = MockTraceMeta()
+
+        mock_api = MagicMock()
+        mock_api.trace.list.return_value = MockTraceListResponse()
+
+        with patch(
+            "src.compliance_bridge.main._get_compliance_api", return_value=mock_api
+        ):
+            response = client.get("/v1/telemetry/history?page=1&limit=20")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "telemetry" in data
+        assert len(data["telemetry"]) == 1
+        item = data["telemetry"][0]
+        assert item["traceId"] == "trace-123"
+        assert item["auditId"] == "audit-abc"
+        assert item["result"] == "PASS"
+        assert data["hasMore"] is True
+
+
+# ---------------------------------------------------------------------------
+
+# ── types constants ──
+# ---------------------------------------------------------------------------
+
+
+class TestTypesConstants:
+    def test_supported_controls_contains_expected(self):
+        from src.compliance_bridge.types import SUPPORTED_CONTROLS
+
+        assert "A.5.2" in SUPPORTED_CONTROLS
+        assert "A.5.3" in SUPPORTED_CONTROLS
+        assert "A.9.2" in SUPPORTED_CONTROLS
+        assert "SC-4" in SUPPORTED_CONTROLS
+
+    def test_critical_controls_subset_of_supported(self):
+        from src.compliance_bridge.types import CRITICAL_CONTROLS, SUPPORTED_CONTROLS
+
+        for c in CRITICAL_CONTROLS:
+            assert c in SUPPORTED_CONTROLS
+
+    def test_iso_control_map_values_are_supported(self):
+        from src.compliance_bridge.types import SUPPORTED_CONTROLS, get_iso_control_map
+
+        # Use region-aware accessor for universal controls
+        iso_control_map = get_iso_control_map("LOCAL")
+        for event_name, control_id in iso_control_map.items():
+            assert control_id in SUPPORTED_CONTROLS, (
+                f"ISO control map [{event_name!r}]={control_id!r} not in SUPPORTED_CONTROLS"
+            )
+
+
+class TestFtraControlMappings:
+    """Verify the FTRA boundary control mapping (SI-10) in the US_FED jurisdiction."""
+
+    def test_ac4_absent_in_every_region(self):
+        """AC-4 has no emitter: its only claimant (FTRA parameter-smuggling
+        protection) never ran, so no region may advertise it."""
+        from src.compliance_bridge.types import get_control_meta
+
+        for region in ("US_FED", "EU_ECB", "APAC_MAS"):
+            assert "AC-4" not in get_control_meta(region), region
+
+    def test_si10_present_in_us_fed(self):
+        """SI-10 (Input Validation) must be present in US_FED controls."""
+        from src.compliance_bridge.types import get_control_meta
+
+        us_fed_controls = get_control_meta("US_FED")
+        assert "SI-10" in us_fed_controls
+
+        si10_meta = us_fed_controls["SI-10"]
+        assert si10_meta["name"] == "Input Validation — Multi-Component Protection"
+        assert si10_meta["scoreName"] == "nist.SI-10.passed"
+        assert si10_meta["iso_clause"] == "NIST SP 800-53 Rev 5 SI-10"
+        assert "fedramp" in si10_meta["frameworks"]
+        assert (
+            si10_meta["frameworks"]["fedramp"] == "SI-10 (Information Input Validation)"
+        )
+        assert "aarm" in si10_meta["frameworks"]
+
+    def test_si10_not_in_eu_ecb(self):
+        """SI-10 must NOT be present in EU_ECB controls (jurisdictional isolation)."""
+        from src.compliance_bridge.types import get_control_meta
+
+        eu_ecb_controls = get_control_meta("EU_ECB")
+        assert "SI-10" not in eu_ecb_controls
+
+    def test_si10_not_in_apac_mas(self):
+        """SI-10 must NOT be present in APAC_MAS controls (jurisdictional isolation)."""
+        from src.compliance_bridge.types import get_control_meta
+
+        apac_mas_controls = get_control_meta("APAC_MAS")
+        assert "SI-10" not in apac_mas_controls
+
+    def test_ftra_boundary_check_maps_to_si10(self):
+        """ftra_boundary_check event must map to SI-10 under US_FED."""
+        from src.compliance_bridge.types import get_iso_control_map
+
+        us_fed_map = get_iso_control_map("US_FED")
+        assert "ftra_boundary_check" in us_fed_map
+        assert us_fed_map["ftra_boundary_check"] == "SI-10"
+
+    @pytest.mark.parametrize(
+        "event", ["ftra_semantic_validation", "ftra_flow_enforcement"]
+    )
+    def test_deleted_ftra_events_are_not_mapped(self, event):
+        """Events with no producer (deleted semantic validator, never-emitted
+        flow enforcement) have no mapping in any region."""
+        from src.compliance_bridge.types import get_iso_control_map
+
+        for region in ("US_FED", "EU_ECB", "APAC_MAS"):
+            assert event not in get_iso_control_map(region), (event, region)
+
+    def test_ftra_events_not_in_eu_ecb_map(self):
+        """FTRA events must NOT appear in EU_ECB control map (jurisdictional isolation)."""
+        from src.compliance_bridge.types import get_iso_control_map
+
+        eu_ecb_map = get_iso_control_map("EU_ECB")
+        assert "ftra_boundary_check" not in eu_ecb_map
+
+    def test_ftra_events_not_in_apac_mas_map(self):
+        """FTRA events must NOT appear in APAC_MAS control map (jurisdictional isolation)."""
+        from src.compliance_bridge.types import get_iso_control_map
+
+        apac_mas_map = get_iso_control_map("APAC_MAS")
+        assert "ftra_boundary_check" not in apac_mas_map
+
+
+class TestUniversalAssuranceStatus:
+    """Verify AssuranceStatus enum and AssurancePosture model (v3.1.5 Sprint 1 Phase 1.1-1.2)."""
+
+    def test_assurance_status_enum_has_four_states(self):
+        """AssuranceStatus must define exactly 4 lifecycle states."""
+        from src.compliance_bridge.types import AssuranceStatus
+
+        assert len(AssuranceStatus) == 4
+        assert AssuranceStatus.ILLUSTRATIVE_REFERENCE.value == "ILLUSTRATIVE_REFERENCE"
+        assert (
+            AssuranceStatus.SELF_ASSESSED_PRE_DEPLOYMENT.value
+            == "SELF_ASSESSED_PRE_DEPLOYMENT"
+        )
+        assert AssuranceStatus.OPERATIONAL_STAGING.value == "OPERATIONAL_STAGING"
+        assert AssuranceStatus.THIRD_PARTY_ASSESSED.value == "THIRD_PARTY_ASSESSED"
+
+    def test_assurance_posture_defaults_to_illustrative(self):
+        """AssurancePosture must default to ILLUSTRATIVE_REFERENCE status."""
+        from src.compliance_bridge.types import AssurancePosture, AssuranceStatus
+
+        posture = AssurancePosture()
+        assert posture.status == AssuranceStatus.ILLUSTRATIVE_REFERENCE
+        assert posture.attestation_boundary == "CODEBASE_SYNTHETIC_EVALUATION"
+        assert posture.third_party_certificate_url is None
+
+    def test_assurance_posture_is_frozen(self):
+        """AssurancePosture must be frozen (immutable after construction)."""
+        from pydantic import ValidationError
+
+        from src.compliance_bridge.types import AssurancePosture
+
+        posture = AssurancePosture()
+        with pytest.raises(ValidationError, match="frozen"):
+            posture.status = "OPERATIONAL_STAGING"  # type: ignore
+
+    def test_disclaimer_mentions_all_frameworks(self):
+        """AssurancePosture disclaimer must mention FedRAMP, CE Mark, ISO/IEC 42001, and MAS."""
+        from src.compliance_bridge.types import AssurancePosture
+
+        posture = AssurancePosture()
+        disclaimer = posture.disclaimer
+        assert "FedRAMP" in disclaimer
+        assert any(
+            term in disclaimer for term in ("CE Conformity Mark", "CE Mark", "EU")
+        )
+        assert "ISO/IEC 42001" in disclaimer or "42001" in disclaimer
+        assert "MAS" in disclaimer or "Monetary Authority of Singapore" in disclaimer
+        assert (
+            "architectural reference" in disclaimer.lower()
+            or "reference architecture" in disclaimer.lower()
+        )
+
+
+class TestAssurancePostureInOSCAL:
+    """Verify AssurancePosture injection into OSCAL SSP exports (v3.1.5 Sprint 1 Phase 1.2)."""
+
+    def test_us_fed_ssp_includes_assurance_posture(self):
+        """US_FED SSP export must include AssurancePosture in metadata."""
+        from src.compliance_bridge.types import AssurancePosture
+        from src.gateway.governance.oscal_ssp_exporter import _build_metadata
+
+        metadata = _build_metadata(region="US_FED")
+
+        # metadata must include 'props' list with assurance posture properties
+        assert "props" in metadata
+        props = metadata["props"]
+
+        # Extract assurance_status and attestation_boundary from props
+        assurance_status_prop = next(
+            (p for p in props if p["name"] == "assurance_status"), None
+        )
+        attestation_boundary_prop = next(
+            (p for p in props if p["name"] == "attestation_boundary"), None
+        )
+
+        assert assurance_status_prop is not None
+        assert attestation_boundary_prop is not None
+        assert assurance_status_prop["value"] == "ILLUSTRATIVE_REFERENCE"
+        assert attestation_boundary_prop["value"] == "CODEBASE_SYNTHETIC_EVALUATION"
+
+    def test_eu_ecb_ssp_includes_assurance_posture(self):
+        """EU_ECB SSP export must include AssurancePosture in metadata."""
+        from src.compliance_bridge.types import AssurancePosture
+        from src.gateway.governance.oscal_ssp_exporter import _build_metadata
+
+        metadata = _build_metadata(region="EU_ECB")
+
+        # metadata must include 'props' list with assurance posture properties
+        assert "props" in metadata
+        props = metadata["props"]
+
+        # Extract assurance_status from props
+        assurance_status_prop = next(
+            (p for p in props if p["name"] == "assurance_status"), None
+        )
+
+        assert assurance_status_prop is not None
+        assert assurance_status_prop["value"] == "ILLUSTRATIVE_REFERENCE"
+
+    def test_apac_mas_ssp_includes_assurance_posture(self):
+        """APAC_MAS SSP export must include AssurancePosture in metadata."""
+        from src.compliance_bridge.types import AssurancePosture
+        from src.gateway.governance.oscal_ssp_exporter import _build_metadata
+
+        metadata = _build_metadata(region="APAC_MAS")
+
+        # metadata must include 'props' list with assurance posture properties
+        assert "props" in metadata
+        props = metadata["props"]
+
+        # Extract assurance_status from props
+        assurance_status_prop = next(
+            (p for p in props if p["name"] == "assurance_status"), None
+        )
+
+        assert assurance_status_prop is not None
+        assert assurance_status_prop["value"] == "ILLUSTRATIVE_REFERENCE"

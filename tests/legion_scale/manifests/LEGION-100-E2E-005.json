@@ -1,0 +1,1378 @@
+{
+  "schema": "legion100-synthetic-e2e-contract/0.1",
+  "scenario_id": "LEGION-100-E2E-005",
+  "purpose": "ONE collective mission, not multiple independent worker demos",
+  "n_agents": 100,
+  "n_obligations": 100,
+  "n_expected_authorized_native_effects": 100,
+  "independent_native_target": true,
+  "zero_state": {
+    "stage_by_shard": {
+      "service-shard-00": -1,
+      "service-shard-01": -1,
+      "service-shard-02": -1,
+      "service-shard-03": -1,
+      "service-shard-04": -1,
+      "service-shard-05": -1,
+      "service-shard-06": -1,
+      "service-shard-07": -1,
+      "service-shard-08": -1,
+      "service-shard-09": -1
+    }
+  },
+  "expected_final_state": {
+    "stage_by_shard": {
+      "service-shard-00": 9,
+      "service-shard-01": 9,
+      "service-shard-02": 9,
+      "service-shard-03": 9,
+      "service-shard-04": 9,
+      "service-shard-05": 9,
+      "service-shard-06": 9,
+      "service-shard-07": 9,
+      "service-shard-08": 9,
+      "service-shard-09": 9
+    }
+  },
+  "nodes": [
+    {
+      "obligation_id": "L00-S00",
+      "agent_id": "agent:legion-l00-s00",
+      "workload_identity": "legion-00-00-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-00",
+      "tool": "apply_transition",
+      "stage": 0,
+      "dependencies": [],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L01-S00",
+      "agent_id": "agent:legion-l01-s00",
+      "workload_identity": "legion-01-00-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-01",
+      "tool": "apply_transition",
+      "stage": 0,
+      "dependencies": [],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L02-S00",
+      "agent_id": "agent:legion-l02-s00",
+      "workload_identity": "legion-02-00-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-02",
+      "tool": "apply_transition",
+      "stage": 0,
+      "dependencies": [],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L03-S00",
+      "agent_id": "agent:legion-l03-s00",
+      "workload_identity": "legion-03-00-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-03",
+      "tool": "apply_transition",
+      "stage": 0,
+      "dependencies": [],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L04-S00",
+      "agent_id": "agent:legion-l04-s00",
+      "workload_identity": "legion-04-00-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-04",
+      "tool": "apply_transition",
+      "stage": 0,
+      "dependencies": [],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L05-S00",
+      "agent_id": "agent:legion-l05-s00",
+      "workload_identity": "legion-05-00-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-05",
+      "tool": "apply_transition",
+      "stage": 0,
+      "dependencies": [],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L06-S00",
+      "agent_id": "agent:legion-l06-s00",
+      "workload_identity": "legion-06-00-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-06",
+      "tool": "apply_transition",
+      "stage": 0,
+      "dependencies": [],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L07-S00",
+      "agent_id": "agent:legion-l07-s00",
+      "workload_identity": "legion-07-00-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-07",
+      "tool": "apply_transition",
+      "stage": 0,
+      "dependencies": [],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L08-S00",
+      "agent_id": "agent:legion-l08-s00",
+      "workload_identity": "legion-08-00-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-08",
+      "tool": "apply_transition",
+      "stage": 0,
+      "dependencies": [],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L09-S00",
+      "agent_id": "agent:legion-l09-s00",
+      "workload_identity": "legion-09-00-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-09",
+      "tool": "apply_transition",
+      "stage": 0,
+      "dependencies": [],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L00-S01",
+      "agent_id": "agent:legion-l00-s01",
+      "workload_identity": "legion-00-01-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-00",
+      "tool": "apply_transition",
+      "stage": 1,
+      "dependencies": [
+        "L00-S00"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L01-S01",
+      "agent_id": "agent:legion-l01-s01",
+      "workload_identity": "legion-01-01-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-01",
+      "tool": "apply_transition",
+      "stage": 1,
+      "dependencies": [
+        "L01-S00",
+        "L00-S00"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L02-S01",
+      "agent_id": "agent:legion-l02-s01",
+      "workload_identity": "legion-02-01-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-02",
+      "tool": "apply_transition",
+      "stage": 1,
+      "dependencies": [
+        "L02-S00",
+        "L01-S00"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L03-S01",
+      "agent_id": "agent:legion-l03-s01",
+      "workload_identity": "legion-03-01-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-03",
+      "tool": "apply_transition",
+      "stage": 1,
+      "dependencies": [
+        "L03-S00",
+        "L02-S00"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L04-S01",
+      "agent_id": "agent:legion-l04-s01",
+      "workload_identity": "legion-04-01-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-04",
+      "tool": "apply_transition",
+      "stage": 1,
+      "dependencies": [
+        "L04-S00",
+        "L03-S00"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L05-S01",
+      "agent_id": "agent:legion-l05-s01",
+      "workload_identity": "legion-05-01-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-05",
+      "tool": "apply_transition",
+      "stage": 1,
+      "dependencies": [
+        "L05-S00",
+        "L04-S00"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L06-S01",
+      "agent_id": "agent:legion-l06-s01",
+      "workload_identity": "legion-06-01-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-06",
+      "tool": "apply_transition",
+      "stage": 1,
+      "dependencies": [
+        "L06-S00",
+        "L05-S00"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L07-S01",
+      "agent_id": "agent:legion-l07-s01",
+      "workload_identity": "legion-07-01-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-07",
+      "tool": "apply_transition",
+      "stage": 1,
+      "dependencies": [
+        "L07-S00",
+        "L06-S00"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L08-S01",
+      "agent_id": "agent:legion-l08-s01",
+      "workload_identity": "legion-08-01-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-08",
+      "tool": "apply_transition",
+      "stage": 1,
+      "dependencies": [
+        "L08-S00",
+        "L07-S00"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L09-S01",
+      "agent_id": "agent:legion-l09-s01",
+      "workload_identity": "legion-09-01-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-09",
+      "tool": "apply_transition",
+      "stage": 1,
+      "dependencies": [
+        "L09-S00",
+        "L08-S00"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L00-S02",
+      "agent_id": "agent:legion-l00-s02",
+      "workload_identity": "legion-00-02-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-00",
+      "tool": "apply_transition",
+      "stage": 2,
+      "dependencies": [
+        "L00-S01"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L01-S02",
+      "agent_id": "agent:legion-l01-s02",
+      "workload_identity": "legion-01-02-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-01",
+      "tool": "apply_transition",
+      "stage": 2,
+      "dependencies": [
+        "L01-S01"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L02-S02",
+      "agent_id": "agent:legion-l02-s02",
+      "workload_identity": "legion-02-02-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-02",
+      "tool": "apply_transition",
+      "stage": 2,
+      "dependencies": [
+        "L02-S01"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L03-S02",
+      "agent_id": "agent:legion-l03-s02",
+      "workload_identity": "legion-03-02-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-03",
+      "tool": "apply_transition",
+      "stage": 2,
+      "dependencies": [
+        "L03-S01"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L04-S02",
+      "agent_id": "agent:legion-l04-s02",
+      "workload_identity": "legion-04-02-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-04",
+      "tool": "apply_transition",
+      "stage": 2,
+      "dependencies": [
+        "L04-S01"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L05-S02",
+      "agent_id": "agent:legion-l05-s02",
+      "workload_identity": "legion-05-02-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-05",
+      "tool": "apply_transition",
+      "stage": 2,
+      "dependencies": [
+        "L05-S01"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L06-S02",
+      "agent_id": "agent:legion-l06-s02",
+      "workload_identity": "legion-06-02-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-06",
+      "tool": "apply_transition",
+      "stage": 2,
+      "dependencies": [
+        "L06-S01"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L07-S02",
+      "agent_id": "agent:legion-l07-s02",
+      "workload_identity": "legion-07-02-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-07",
+      "tool": "apply_transition",
+      "stage": 2,
+      "dependencies": [
+        "L07-S01"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L08-S02",
+      "agent_id": "agent:legion-l08-s02",
+      "workload_identity": "legion-08-02-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-08",
+      "tool": "apply_transition",
+      "stage": 2,
+      "dependencies": [
+        "L08-S01"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L09-S02",
+      "agent_id": "agent:legion-l09-s02",
+      "workload_identity": "legion-09-02-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-09",
+      "tool": "apply_transition",
+      "stage": 2,
+      "dependencies": [
+        "L09-S01"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L00-S03",
+      "agent_id": "agent:legion-l00-s03",
+      "workload_identity": "legion-00-03-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-00",
+      "tool": "apply_transition",
+      "stage": 3,
+      "dependencies": [
+        "L00-S02"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L01-S03",
+      "agent_id": "agent:legion-l01-s03",
+      "workload_identity": "legion-01-03-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-01",
+      "tool": "apply_transition",
+      "stage": 3,
+      "dependencies": [
+        "L01-S02",
+        "L00-S02"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L02-S03",
+      "agent_id": "agent:legion-l02-s03",
+      "workload_identity": "legion-02-03-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-02",
+      "tool": "apply_transition",
+      "stage": 3,
+      "dependencies": [
+        "L02-S02",
+        "L01-S02"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L03-S03",
+      "agent_id": "agent:legion-l03-s03",
+      "workload_identity": "legion-03-03-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-03",
+      "tool": "apply_transition",
+      "stage": 3,
+      "dependencies": [
+        "L03-S02",
+        "L02-S02"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L04-S03",
+      "agent_id": "agent:legion-l04-s03",
+      "workload_identity": "legion-04-03-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-04",
+      "tool": "apply_transition",
+      "stage": 3,
+      "dependencies": [
+        "L04-S02",
+        "L03-S02"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L05-S03",
+      "agent_id": "agent:legion-l05-s03",
+      "workload_identity": "legion-05-03-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-05",
+      "tool": "apply_transition",
+      "stage": 3,
+      "dependencies": [
+        "L05-S02",
+        "L04-S02"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L06-S03",
+      "agent_id": "agent:legion-l06-s03",
+      "workload_identity": "legion-06-03-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-06",
+      "tool": "apply_transition",
+      "stage": 3,
+      "dependencies": [
+        "L06-S02",
+        "L05-S02"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L07-S03",
+      "agent_id": "agent:legion-l07-s03",
+      "workload_identity": "legion-07-03-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-07",
+      "tool": "apply_transition",
+      "stage": 3,
+      "dependencies": [
+        "L07-S02",
+        "L06-S02"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L08-S03",
+      "agent_id": "agent:legion-l08-s03",
+      "workload_identity": "legion-08-03-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-08",
+      "tool": "apply_transition",
+      "stage": 3,
+      "dependencies": [
+        "L08-S02",
+        "L07-S02"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L09-S03",
+      "agent_id": "agent:legion-l09-s03",
+      "workload_identity": "legion-09-03-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-09",
+      "tool": "apply_transition",
+      "stage": 3,
+      "dependencies": [
+        "L09-S02",
+        "L08-S02"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L00-S04",
+      "agent_id": "agent:legion-l00-s04",
+      "workload_identity": "legion-00-04-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-00",
+      "tool": "apply_transition",
+      "stage": 4,
+      "dependencies": [
+        "L00-S03"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L01-S04",
+      "agent_id": "agent:legion-l01-s04",
+      "workload_identity": "legion-01-04-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-01",
+      "tool": "apply_transition",
+      "stage": 4,
+      "dependencies": [
+        "L01-S03"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L02-S04",
+      "agent_id": "agent:legion-l02-s04",
+      "workload_identity": "legion-02-04-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-02",
+      "tool": "apply_transition",
+      "stage": 4,
+      "dependencies": [
+        "L02-S03"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L03-S04",
+      "agent_id": "agent:legion-l03-s04",
+      "workload_identity": "legion-03-04-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-03",
+      "tool": "apply_transition",
+      "stage": 4,
+      "dependencies": [
+        "L03-S03"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L04-S04",
+      "agent_id": "agent:legion-l04-s04",
+      "workload_identity": "legion-04-04-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-04",
+      "tool": "apply_transition",
+      "stage": 4,
+      "dependencies": [
+        "L04-S03"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L05-S04",
+      "agent_id": "agent:legion-l05-s04",
+      "workload_identity": "legion-05-04-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-05",
+      "tool": "apply_transition",
+      "stage": 4,
+      "dependencies": [
+        "L05-S03"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L06-S04",
+      "agent_id": "agent:legion-l06-s04",
+      "workload_identity": "legion-06-04-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-06",
+      "tool": "apply_transition",
+      "stage": 4,
+      "dependencies": [
+        "L06-S03"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L07-S04",
+      "agent_id": "agent:legion-l07-s04",
+      "workload_identity": "legion-07-04-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-07",
+      "tool": "apply_transition",
+      "stage": 4,
+      "dependencies": [
+        "L07-S03"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L08-S04",
+      "agent_id": "agent:legion-l08-s04",
+      "workload_identity": "legion-08-04-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-08",
+      "tool": "apply_transition",
+      "stage": 4,
+      "dependencies": [
+        "L08-S03"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L09-S04",
+      "agent_id": "agent:legion-l09-s04",
+      "workload_identity": "legion-09-04-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-09",
+      "tool": "apply_transition",
+      "stage": 4,
+      "dependencies": [
+        "L09-S03"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L00-S05",
+      "agent_id": "agent:legion-l00-s05",
+      "workload_identity": "legion-00-05-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-00",
+      "tool": "apply_transition",
+      "stage": 5,
+      "dependencies": [
+        "L00-S04"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L01-S05",
+      "agent_id": "agent:legion-l01-s05",
+      "workload_identity": "legion-01-05-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-01",
+      "tool": "apply_transition",
+      "stage": 5,
+      "dependencies": [
+        "L01-S04",
+        "L00-S04"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L02-S05",
+      "agent_id": "agent:legion-l02-s05",
+      "workload_identity": "legion-02-05-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-02",
+      "tool": "apply_transition",
+      "stage": 5,
+      "dependencies": [
+        "L02-S04",
+        "L01-S04"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L03-S05",
+      "agent_id": "agent:legion-l03-s05",
+      "workload_identity": "legion-03-05-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-03",
+      "tool": "apply_transition",
+      "stage": 5,
+      "dependencies": [
+        "L03-S04",
+        "L02-S04"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L04-S05",
+      "agent_id": "agent:legion-l04-s05",
+      "workload_identity": "legion-04-05-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-04",
+      "tool": "apply_transition",
+      "stage": 5,
+      "dependencies": [
+        "L04-S04",
+        "L03-S04"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L05-S05",
+      "agent_id": "agent:legion-l05-s05",
+      "workload_identity": "legion-05-05-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-05",
+      "tool": "apply_transition",
+      "stage": 5,
+      "dependencies": [
+        "L05-S04",
+        "L04-S04"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L06-S05",
+      "agent_id": "agent:legion-l06-s05",
+      "workload_identity": "legion-06-05-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-06",
+      "tool": "apply_transition",
+      "stage": 5,
+      "dependencies": [
+        "L06-S04",
+        "L05-S04"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L07-S05",
+      "agent_id": "agent:legion-l07-s05",
+      "workload_identity": "legion-07-05-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-07",
+      "tool": "apply_transition",
+      "stage": 5,
+      "dependencies": [
+        "L07-S04",
+        "L06-S04"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L08-S05",
+      "agent_id": "agent:legion-l08-s05",
+      "workload_identity": "legion-08-05-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-08",
+      "tool": "apply_transition",
+      "stage": 5,
+      "dependencies": [
+        "L08-S04",
+        "L07-S04"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L09-S05",
+      "agent_id": "agent:legion-l09-s05",
+      "workload_identity": "legion-09-05-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-09",
+      "tool": "apply_transition",
+      "stage": 5,
+      "dependencies": [
+        "L09-S04",
+        "L08-S04"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L00-S06",
+      "agent_id": "agent:legion-l00-s06",
+      "workload_identity": "legion-00-06-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-00",
+      "tool": "apply_transition",
+      "stage": 6,
+      "dependencies": [
+        "L00-S05"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L01-S06",
+      "agent_id": "agent:legion-l01-s06",
+      "workload_identity": "legion-01-06-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-01",
+      "tool": "apply_transition",
+      "stage": 6,
+      "dependencies": [
+        "L01-S05"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L02-S06",
+      "agent_id": "agent:legion-l02-s06",
+      "workload_identity": "legion-02-06-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-02",
+      "tool": "apply_transition",
+      "stage": 6,
+      "dependencies": [
+        "L02-S05"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L03-S06",
+      "agent_id": "agent:legion-l03-s06",
+      "workload_identity": "legion-03-06-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-03",
+      "tool": "apply_transition",
+      "stage": 6,
+      "dependencies": [
+        "L03-S05"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L04-S06",
+      "agent_id": "agent:legion-l04-s06",
+      "workload_identity": "legion-04-06-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-04",
+      "tool": "apply_transition",
+      "stage": 6,
+      "dependencies": [
+        "L04-S05"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L05-S06",
+      "agent_id": "agent:legion-l05-s06",
+      "workload_identity": "legion-05-06-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-05",
+      "tool": "apply_transition",
+      "stage": 6,
+      "dependencies": [
+        "L05-S05"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L06-S06",
+      "agent_id": "agent:legion-l06-s06",
+      "workload_identity": "legion-06-06-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-06",
+      "tool": "apply_transition",
+      "stage": 6,
+      "dependencies": [
+        "L06-S05"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L07-S06",
+      "agent_id": "agent:legion-l07-s06",
+      "workload_identity": "legion-07-06-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-07",
+      "tool": "apply_transition",
+      "stage": 6,
+      "dependencies": [
+        "L07-S05"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L08-S06",
+      "agent_id": "agent:legion-l08-s06",
+      "workload_identity": "legion-08-06-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-08",
+      "tool": "apply_transition",
+      "stage": 6,
+      "dependencies": [
+        "L08-S05"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L09-S06",
+      "agent_id": "agent:legion-l09-s06",
+      "workload_identity": "legion-09-06-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-09",
+      "tool": "apply_transition",
+      "stage": 6,
+      "dependencies": [
+        "L09-S05"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L00-S07",
+      "agent_id": "agent:legion-l00-s07",
+      "workload_identity": "legion-00-07-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-00",
+      "tool": "apply_transition",
+      "stage": 7,
+      "dependencies": [
+        "L00-S06"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L01-S07",
+      "agent_id": "agent:legion-l01-s07",
+      "workload_identity": "legion-01-07-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-01",
+      "tool": "apply_transition",
+      "stage": 7,
+      "dependencies": [
+        "L01-S06",
+        "L00-S06"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L02-S07",
+      "agent_id": "agent:legion-l02-s07",
+      "workload_identity": "legion-02-07-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-02",
+      "tool": "apply_transition",
+      "stage": 7,
+      "dependencies": [
+        "L02-S06",
+        "L01-S06"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L03-S07",
+      "agent_id": "agent:legion-l03-s07",
+      "workload_identity": "legion-03-07-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-03",
+      "tool": "apply_transition",
+      "stage": 7,
+      "dependencies": [
+        "L03-S06",
+        "L02-S06"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L04-S07",
+      "agent_id": "agent:legion-l04-s07",
+      "workload_identity": "legion-04-07-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-04",
+      "tool": "apply_transition",
+      "stage": 7,
+      "dependencies": [
+        "L04-S06",
+        "L03-S06"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L05-S07",
+      "agent_id": "agent:legion-l05-s07",
+      "workload_identity": "legion-05-07-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-05",
+      "tool": "apply_transition",
+      "stage": 7,
+      "dependencies": [
+        "L05-S06",
+        "L04-S06"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L06-S07",
+      "agent_id": "agent:legion-l06-s07",
+      "workload_identity": "legion-06-07-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-06",
+      "tool": "apply_transition",
+      "stage": 7,
+      "dependencies": [
+        "L06-S06",
+        "L05-S06"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L07-S07",
+      "agent_id": "agent:legion-l07-s07",
+      "workload_identity": "legion-07-07-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-07",
+      "tool": "apply_transition",
+      "stage": 7,
+      "dependencies": [
+        "L07-S06",
+        "L06-S06"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L08-S07",
+      "agent_id": "agent:legion-l08-s07",
+      "workload_identity": "legion-08-07-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-08",
+      "tool": "apply_transition",
+      "stage": 7,
+      "dependencies": [
+        "L08-S06",
+        "L07-S06"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L09-S07",
+      "agent_id": "agent:legion-l09-s07",
+      "workload_identity": "legion-09-07-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-09",
+      "tool": "apply_transition",
+      "stage": 7,
+      "dependencies": [
+        "L09-S06",
+        "L08-S06"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L00-S08",
+      "agent_id": "agent:legion-l00-s08",
+      "workload_identity": "legion-00-08-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-00",
+      "tool": "apply_transition",
+      "stage": 8,
+      "dependencies": [
+        "L00-S07"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L01-S08",
+      "agent_id": "agent:legion-l01-s08",
+      "workload_identity": "legion-01-08-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-01",
+      "tool": "apply_transition",
+      "stage": 8,
+      "dependencies": [
+        "L01-S07"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L02-S08",
+      "agent_id": "agent:legion-l02-s08",
+      "workload_identity": "legion-02-08-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-02",
+      "tool": "apply_transition",
+      "stage": 8,
+      "dependencies": [
+        "L02-S07"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L03-S08",
+      "agent_id": "agent:legion-l03-s08",
+      "workload_identity": "legion-03-08-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-03",
+      "tool": "apply_transition",
+      "stage": 8,
+      "dependencies": [
+        "L03-S07"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L04-S08",
+      "agent_id": "agent:legion-l04-s08",
+      "workload_identity": "legion-04-08-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-04",
+      "tool": "apply_transition",
+      "stage": 8,
+      "dependencies": [
+        "L04-S07"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L05-S08",
+      "agent_id": "agent:legion-l05-s08",
+      "workload_identity": "legion-05-08-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-05",
+      "tool": "apply_transition",
+      "stage": 8,
+      "dependencies": [
+        "L05-S07"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L06-S08",
+      "agent_id": "agent:legion-l06-s08",
+      "workload_identity": "legion-06-08-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-06",
+      "tool": "apply_transition",
+      "stage": 8,
+      "dependencies": [
+        "L06-S07"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L07-S08",
+      "agent_id": "agent:legion-l07-s08",
+      "workload_identity": "legion-07-08-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-07",
+      "tool": "apply_transition",
+      "stage": 8,
+      "dependencies": [
+        "L07-S07"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L08-S08",
+      "agent_id": "agent:legion-l08-s08",
+      "workload_identity": "legion-08-08-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-08",
+      "tool": "apply_transition",
+      "stage": 8,
+      "dependencies": [
+        "L08-S07"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L09-S08",
+      "agent_id": "agent:legion-l09-s08",
+      "workload_identity": "legion-09-08-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-09",
+      "tool": "apply_transition",
+      "stage": 8,
+      "dependencies": [
+        "L09-S07"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L00-S09",
+      "agent_id": "agent:legion-l00-s09",
+      "workload_identity": "legion-00-09-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-00",
+      "tool": "apply_transition",
+      "stage": 9,
+      "dependencies": [
+        "L00-S08"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L01-S09",
+      "agent_id": "agent:legion-l01-s09",
+      "workload_identity": "legion-01-09-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-01",
+      "tool": "apply_transition",
+      "stage": 9,
+      "dependencies": [
+        "L01-S08",
+        "L00-S08"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L02-S09",
+      "agent_id": "agent:legion-l02-s09",
+      "workload_identity": "legion-02-09-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-02",
+      "tool": "apply_transition",
+      "stage": 9,
+      "dependencies": [
+        "L02-S08",
+        "L01-S08"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L03-S09",
+      "agent_id": "agent:legion-l03-s09",
+      "workload_identity": "legion-03-09-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-03",
+      "tool": "apply_transition",
+      "stage": 9,
+      "dependencies": [
+        "L03-S08",
+        "L02-S08"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L04-S09",
+      "agent_id": "agent:legion-l04-s09",
+      "workload_identity": "legion-04-09-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-04",
+      "tool": "apply_transition",
+      "stage": 9,
+      "dependencies": [
+        "L04-S08",
+        "L03-S08"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L05-S09",
+      "agent_id": "agent:legion-l05-s09",
+      "workload_identity": "legion-05-09-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-05",
+      "tool": "apply_transition",
+      "stage": 9,
+      "dependencies": [
+        "L05-S08",
+        "L04-S08"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L06-S09",
+      "agent_id": "agent:legion-l06-s09",
+      "workload_identity": "legion-06-09-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-06",
+      "tool": "apply_transition",
+      "stage": 9,
+      "dependencies": [
+        "L06-S08",
+        "L05-S08"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L07-S09",
+      "agent_id": "agent:legion-l07-s09",
+      "workload_identity": "legion-07-09-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-07",
+      "tool": "apply_transition",
+      "stage": 9,
+      "dependencies": [
+        "L07-S08",
+        "L06-S08"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L08-S09",
+      "agent_id": "agent:legion-l08-s09",
+      "workload_identity": "legion-08-09-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-08",
+      "tool": "apply_transition",
+      "stage": 9,
+      "dependencies": [
+        "L08-S08",
+        "L07-S08"
+      ],
+      "expected_effects": 1
+    },
+    {
+      "obligation_id": "L09-S09",
+      "agent_id": "agent:legion-l09-s09",
+      "workload_identity": "legion-09-09-sa.legion.serviceaccount.identity.linkerd.cluster.local",
+      "system_id": "legion-synthetic-sre",
+      "target_id": "service-shard-09",
+      "tool": "apply_transition",
+      "stage": 9,
+      "dependencies": [
+        "L09-S08",
+        "L08-S08"
+      ],
+      "expected_effects": 1
+    }
+  ],
+  "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
+  "coding_model": "muse-wonder-1.0",
+  "model_agent_inference_requirement": "at least one NIM provider-authenticated model call per distinct acting agent with an exact decision-to-effect link",
+  "governance": "CAGE + ZTL + VEIP, all native mutations through verified commitments, TEST scope",
+  "oracle": "separate OS process; independently reads native state+effects and validates signed reliance, evidence, receipts, causality",
+  "first_attempt_rule": "one frozen first attempt for this scenario; failures not retried or relabeled",
+  "expected_zero": [
+    "unauthorized_native_effects",
+    "duplicate_native_effects",
+    "false_completions",
+    "unverified_effects",
+    "orphan_obligations",
+    "missing_model_agent_calls"
+  ]
+}

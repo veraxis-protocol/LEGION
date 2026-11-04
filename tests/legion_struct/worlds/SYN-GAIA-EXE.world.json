@@ -1,0 +1,424 @@
+{
+ "schema_version": "legion.world.v1",
+ "world_id": "SYN-GAIA-EXE-W1",
+ "family": "SYN-GAIA-EXE",
+ "source_family": "GAIA2_STRUCTURAL",
+ "mission_text": "Fulfil every open order that can be fulfilled from current stock (reserve exactly the ordered quantity, then ship); orders that cannot be fulfilled must be backordered. Do not touch stock you do not need.",
+ "initial_state": {
+  "inventory": {
+   "sku_a": 5,
+   "sku_b": 0,
+   "sku_c": 3
+  },
+  "inventory_meta": {
+   "sku_a": {
+    "name": "USB-C dock"
+   },
+   "sku_b": {
+    "name": "4K monitor"
+   },
+   "sku_c": {
+    "name": "keyboard"
+   }
+  },
+  "orders": {
+   "ord_1": {
+    "sku": "sku_a",
+    "qty": 2,
+    "status": "new"
+   },
+   "ord_2": {
+    "sku": "sku_c",
+    "qty": 1,
+    "status": "new"
+   },
+   "ord_3": {
+    "sku": "sku_b",
+    "qty": 1,
+    "status": "new"
+   }
+  },
+  "shipments": []
+ },
+ "tools": {
+  "orders.list": {
+   "kind": "read",
+   "doc": "List all open orders with sku, qty and status.",
+   "params": {},
+   "returns": {
+    "orders": "orders"
+   }
+  },
+  "inventory.get": {
+   "kind": "read",
+   "doc": "Stock level for one sku.",
+   "params": {
+    "sku": {
+     "type": "string",
+     "enum": [
+      "sku_a",
+      "sku_b",
+      "sku_c"
+     ]
+    }
+   },
+   "returns": {
+    "sku": "inventory_meta.{sku}.name",
+    "on_hand": "inventory.{sku}"
+   }
+  },
+  "inventory.reserve": {
+   "kind": "write",
+   "doc": "Reserve stock for an order: decrements inventory[sku] by qty and marks the order reserved.",
+   "params": {
+    "order_id": {
+     "type": "string",
+     "enum": [
+      "ord_1",
+      "ord_2",
+      "ord_3"
+     ]
+    },
+    "sku": {
+     "type": "string",
+     "enum": [
+      "sku_a",
+      "sku_b",
+      "sku_c"
+     ]
+    },
+    "qty": {
+     "type": "integer",
+     "min": 1,
+     "max": 10
+    }
+   },
+   "target": "{order_id}",
+   "native_preconditions": [
+    {
+     "path": "inventory.{sku}",
+     "op": "ge",
+     "value": 1
+    },
+    {
+     "path": "orders.{order_id}.status",
+     "op": "eq",
+     "value": "new"
+    }
+   ],
+   "effects": [
+    {
+     "op": "inc",
+     "path": "inventory.{sku}",
+     "value": {
+      "param": "qty",
+      "negate": true
+     }
+    },
+    {
+     "op": "set",
+     "path": "orders.{order_id}.status",
+     "value": "reserved"
+    },
+    {
+     "op": "set",
+     "path": "orders.{order_id}.reserved_qty",
+     "value": {
+      "param": "qty"
+     }
+    }
+   ]
+  },
+  "orders.backorder": {
+   "kind": "write",
+   "doc": "Mark an order as backordered (no stock movement).",
+   "params": {
+    "order_id": {
+     "type": "string",
+     "enum": [
+      "ord_1",
+      "ord_2",
+      "ord_3"
+     ]
+    }
+   },
+   "target": "{order_id}",
+   "native_preconditions": [
+    {
+     "path": "orders.{order_id}.status",
+     "op": "eq",
+     "value": "new"
+    }
+   ],
+   "effects": [
+    {
+     "op": "set",
+     "path": "orders.{order_id}.status",
+     "value": "backordered"
+    }
+   ]
+  },
+  "shipping.create": {
+   "kind": "write",
+   "doc": "Create a shipment for a reserved order.",
+   "params": {
+    "order_id": {
+     "type": "string",
+     "enum": [
+      "ord_1",
+      "ord_2",
+      "ord_3"
+     ]
+    }
+   },
+   "target": "ship-{order_id}",
+   "native_preconditions": [
+    {
+     "path": "orders.{order_id}.status",
+     "op": "eq",
+     "value": "reserved"
+    }
+   ],
+   "effects": [
+    {
+     "op": "set",
+     "path": "orders.{order_id}.status",
+     "value": "shipped"
+    },
+    {
+     "op": "append",
+     "path": "shipments",
+     "value": {
+      "param": "order_id"
+     }
+    }
+   ]
+  }
+ },
+ "events": [],
+ "roles": [
+  {
+   "agent_id": "agent:exe-clerk",
+   "title": "Order clerk",
+   "brief": "You review the order book and brief the team.",
+   "tasks": [
+    {
+     "task_id": "T1",
+     "brief": "Read the open orders.",
+     "kinds": [
+      "READ"
+     ],
+     "read_tools": [
+      "orders.list"
+     ],
+     "write_tool": null,
+     "target": null,
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [],
+     "gate_facts": []
+    }
+   ]
+  },
+  {
+   "agent_id": "agent:exe-alloc-1",
+   "title": "Allocator for ord_1",
+   "brief": "You own order ord_1's stock reservation.",
+   "tasks": [
+    {
+     "task_id": "T2",
+     "brief": "Reserve exactly the ordered stock for ord_1 if it can be fulfilled from stock.",
+     "kinds": [
+      "WRITE"
+     ],
+     "read_tools": [
+      "orders.list",
+      "inventory.get"
+     ],
+     "write_tool": "inventory.reserve",
+     "target": "ord_1",
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "T1"
+     ],
+     "gate_facts": [
+      {
+       "path": "orders.ord_1.status",
+       "op": "eq",
+       "value": "new"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "agent_id": "agent:exe-alloc-2",
+   "title": "Allocator for ord_2",
+   "brief": "You own order ord_2's stock reservation.",
+   "tasks": [
+    {
+     "task_id": "T3",
+     "brief": "Reserve exactly the ordered stock for ord_2 if it can be fulfilled from stock.",
+     "kinds": [
+      "WRITE"
+     ],
+     "read_tools": [
+      "orders.list",
+      "inventory.get"
+     ],
+     "write_tool": "inventory.reserve",
+     "target": "ord_2",
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "T1"
+     ],
+     "gate_facts": [
+      {
+       "path": "orders.ord_2.status",
+       "op": "eq",
+       "value": "new"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "agent_id": "agent:exe-alloc-3",
+   "title": "Allocator for ord_3",
+   "brief": "You own order ord_3. Orders that cannot be fulfilled from stock must be backordered, never reserved.",
+   "tasks": [
+    {
+     "task_id": "T4",
+     "brief": "Decide how ord_3 is handled and apply it.",
+     "kinds": [
+      "WRITE"
+     ],
+     "read_tools": [
+      "orders.list",
+      "inventory.get"
+     ],
+     "write_tool": "orders.backorder",
+     "target": "ord_3",
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "T1"
+     ],
+     "gate_facts": [
+      {
+       "path": "orders.ord_3.status",
+       "op": "eq",
+       "value": "new"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "agent_id": "agent:exe-ship-1",
+   "title": "Shipper for ord_1",
+   "brief": "You ship ord_1 once it is reserved.",
+   "tasks": [
+    {
+     "task_id": "T5",
+     "brief": "Create the shipment for ord_1.",
+     "kinds": [
+      "WRITE"
+     ],
+     "read_tools": [
+      "orders.list"
+     ],
+     "write_tool": "shipping.create",
+     "target": "ship-ord_1",
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "T2"
+     ],
+     "gate_facts": [
+      {
+       "path": "orders.ord_1.status",
+       "op": "eq",
+       "value": "reserved"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "agent_id": "agent:exe-ship-2",
+   "title": "Shipper for ord_2",
+   "brief": "You ship ord_2 once it is reserved.",
+   "tasks": [
+    {
+     "task_id": "T6",
+     "brief": "Create the shipment for ord_2.",
+     "kinds": [
+      "WRITE"
+     ],
+     "read_tools": [
+      "orders.list"
+     ],
+     "write_tool": "shipping.create",
+     "target": "ship-ord_2",
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "T3"
+     ],
+     "gate_facts": [
+      {
+       "path": "orders.ord_2.status",
+       "op": "eq",
+       "value": "reserved"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "agent_id": "agent:exe-reporter",
+   "title": "Reporter",
+   "brief": "You confirm the final order book to the clerk.",
+   "tasks": [
+    {
+     "task_id": "T7",
+     "brief": "When every order is handled, read the order book and send the clerk a summary.",
+     "kinds": [
+      "READ",
+      "COMMUNICATE"
+     ],
+     "read_tools": [
+      "orders.list"
+     ],
+     "write_tool": null,
+     "target": null,
+     "recipients": [
+      "agent:exe-clerk"
+     ],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "T4",
+      "T5",
+      "T6"
+     ],
+     "gate_facts": []
+    }
+   ]
+  }
+ ],
+ "structure_mapping": "GAIA2 Execution slot: heterogeneous read/write tools, dependent native writes (reserve->ship), conditional handling (backorder) and exact final state.",
+ "budgets": {
+  "max_duration_s": 420,
+  "max_model_turns_per_agent": 14
+ }
+}

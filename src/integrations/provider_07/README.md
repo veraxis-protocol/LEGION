@@ -1,0 +1,327 @@
+# provider_07 — Bayesian Causal Suitability Adapter (Layer 3)
+
+**Adapter Type**: Normative Gating Oracle  
+**Inference Model**: Junction Tree / Belief Propagation  
+**Regulatory Scope**: SEC Reg BI, FINRA Rule 2111, EU AI Act Art. 27  
+**Architecture Layer**: Layer 3 (Integrations & Rails)  
+**Phase**: Step 4 Complete — Production Cutover & Over-the-Wire Conformance Verified  
+
+---
+
+## Overview
+
+The `provider_07` adapter integrates a **Bayesian belief network inference service** (InferTheta) as a normative gating oracle for high-stakes financial advisory scenarios. The service executes **junction tree algorithms** over causal graphs encoding:
+- Client suitability constraints (risk tolerance, investment horizon, liquidity needs)
+- Market conditions (volatility indices, sector correlations)
+- Regulatory thresholds (SEC Reg BI best interest, FINRA suitability obligations)
+
+The adapter maps InferTheta's tri-state decision model (`ALLOW`, `REFUSE`, `ESCALATE`) to CAGE's [`NormativeProvider`](../../gateway/governance/normative_provider.py) seam contract, ensuring:
+- **Cryptographic verifiability** via out-of-band JWKS and Ed25519 signatures
+- **Fail-closed enforcement** on network failures, schema violations, and unknown signing keys
+- **Tamper-evident audit chain** for DENY and DEFER receipts alongside ALLOW approvals
+
+---
+
+## Architecture Position
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ Layer 1: Kernel (src/gateway/)                                 │
+│  └─ NormativeProvider seam (fetch_baseline, validate_fria)     │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+┌────────────────────────▼────────────────────────────────────────┐
+│ Layer 3: Integrations (src/integrations/provider_07/)          │
+│  ├─ schema.py          ← Wire protocol models (Pydantic v2)    │
+│  ├─ adapter.py         ← NormativeProvider implementation       │
+│  ├─ jwks_client.py     ← Out-of-band key resolution            │
+│  └─ signature.py       ← Ed25519 verification (JCS canonical)  │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+                         │ HTTPS + Bearer Auth
+                         ▼
+              ┌──────────────────────┐
+              │ InferTheta API       │
+              │ (External Service)   │
+              └──────────────────────┘
+```
+
+**Key Invariants**:
+- Layer 1 Kernel **NEVER** imports `provider_07` directly (enforced by Gate G3: [`scripts/check_import_boundaries.py`](../../../scripts/check_import_boundaries.py))
+- Generic package naming (`provider_07`) enforces Gate G8 (Vendor Brand Isolation)
+- Vendor brand name "InferTheta" appears **only** in this README and [`docs/partners/provider_07/INFERTHETA_CANONICAL_SCHEMA.md`](../../../docs/partners/provider_07/INFERTHETA_CANONICAL_SCHEMA.md)
+
+---
+
+## Environment Variables
+
+Configure the adapter via environment variables (injected via Kubernetes Secret `provider-07-credentials` or local `.env`):
+
+| Variable | Default | Description | Sensitivity |
+|---|---|---|---|
+| `PROVIDER_07_ENDPOINT` | `http://localhost:8087` | Base URL for InferTheta API (Production: `https://infertheta-cage-prod.onrender.com`, Staging: `https://infertheta-cage-staging.onrender.com`) | Public |
+| `PROVIDER_07_API_KEY` | *(required)* | Bearer token for authentication | **Secret** |
+| `PROVIDER_07_JWKS_URL` | `{endpoint}/.well-known/jwks.json` | Out-of-band JWKS manifest URL (Production: `https://infertheta-cage-prod.onrender.com/.well-known/jwks.json`) | Public |
+| `PROVIDER_07_TIMEOUT_SECONDS` | `5.0` | Request timeout (seconds) | Public |
+| `PROVIDER_07_ALLOW_STEP1_UNSIGNED` | `false` | Dev/testing only. Allows Step 1 unsigned responses (blocked in production) | Internal |
+
+**Secret Management**:
+- `PROVIDER_07_API_KEY` must be stored in a Kubernetes Secret (`provider-07-credentials`) and mounted via `secretKeyRef`
+- **Never** hardcode API keys or embed them in configuration files
+- Mask credentials in logs: `api_key[:4] + "****"`
+
+**Example Kubernetes Secret**:
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: provider-07-credentials
+  namespace: governance-stack
+type: Opaque
+stringData:
+  endpoint: "https://infertheta-cage-prod.onrender.com"
+  jwks-url: "https://infertheta-cage-prod.onrender.com/.well-known/jwks.json"
+  api-key: "<INFERTHETA_BEARER_TOKEN>"
+```
+
+**Example Deployment Manifest**:
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  namespace: governance-stack
+spec:
+  template:
+    spec:
+      containers:
+      - name: gateway
+        env:
+        - name: PROVIDER_07_ENDPOINT
+          valueFrom:
+            secretKeyRef:
+              name: provider-07-credentials
+              key: endpoint
+              optional: true
+        - name: PROVIDER_07_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: provider-07-credentials
+              key: api-key
+              optional: true
+        - name: PROVIDER_07_JWKS_URL
+          valueFrom:
+            secretKeyRef:
+              name: provider-07-credentials
+              key: jwks-url
+              optional: true
+        - name: PROVIDER_07_TIMEOUT_SECONDS
+          value: "5.0"
+```
+
+---
+
+## Fail-Closed Behavior Specification
+
+The adapter enforces **strict fail-closed semantics** on all error conditions:
+
+| Failure Mode | HTTP Status | Error Code | `admitted` | Audit Evidence | Rationale |
+|---|---|---|---|---|---|
+| **Network timeout** | N/A | `HTTP_TIMEOUT` | `False` | Empty response body | Cannot confirm safety → default deny |
+| **HTTP 5xx errors** | 500/502/503 | `PROVIDER_ERROR` | `False` | Server error message | Provider instability → fail closed |
+| **HTTP 404 on baseline** | 404 | `BASELINE_NOT_FOUND` | `False` | Empty baseline | Cannot validate without normative anchor |
+| **Unknown `kid`** | 200 | `INFERTHETA_UNKNOWN_KEY` | `False` | Unresolved key ID | Untrusted signing key → reject |
+| **Invalid Ed25519 signature** | 200 | `SIGNATURE_VERIFICATION_FAILED` | `False` | Signature mismatch | Tampered response → reject |
+| **Malformed JSON** | 200 | `SCHEMA_VALIDATION_ERROR` | `False` | Parsing error | Cannot parse → cannot trust |
+| **Missing `authority_record_id` on `ALLOW`** | 200 | `TOKEN_MINT_FAILED` | `False` | Missing audit token | Authorization without token is invalid |
+| **Non-null `authority_record_id` on `REFUSE` / `ESCALATE`** | 200 | `TOKEN_MINT_FAILED` | `False` | Illegal authority token | Only `ALLOW` may carry an authority record |
+| **`decision == "REFUSE"` (`authority_record_id == null`)** | 200 | *(none)* | `False` | Full response body | Normative refusal (legitimate deny) |
+| **`decision == "ESCALATE"` (`authority_record_id == null`)** | 200 | *(none)* | `False` | Full response body | Deferred to human → block autonomous execution |
+| **`decision == "ALLOW"` + valid signature + token** | 200 | *(none)* | `True` | Full response + signature | All safety gates passed |
+
+**Canonical Transform** (from tri-state to binary):
+```python
+def map_decision_to_admitted(response: InferThetaInferenceResponse) -> bool:
+    """
+    Map tri-state decision to binary admission flag.
+    
+    Fail-closed invariant: Only ALLOW with authority_record_id admits the action.
+    """
+    if response.decision == "ALLOW" and response.authority_record_id:
+        return True
+    else:
+        return False  # REFUSE, ESCALATE, or missing authorization token
+```
+
+**Refusals Are Primary Evidence**: `REFUSE` and `ESCALATE` responses enter the tamper-evident audit chain with full cryptographic verification, identical to `ALLOW` approvals. This ensures regulatory auditors can trace *denials* as rigorously as approvals.
+
+---
+
+## Wire Protocol Summary
+
+### Inference Endpoint: `POST /infer`
+
+**Request**: [`InferThetaInferenceRequest`](schema.py)  
+**Response**: [`InferThetaInferenceResponse`](schema.py)
+
+**Key Fields**:
+- **Input**: `portfolio_vector`, `proposed_trade`, `client_profile`, `market_volatility_index`
+- **Output**: `decision` (ALLOW/REFUSE/ESCALATE), `posterior_risk_score`, `marginal_probabilities`, `utility_rankings`
+- **Audit**: `authority_record_id` (mandatory for ALLOW), `kid` + `signature` (Ed25519 over JCS canonical body)
+
+### Baseline Endpoint: `GET /baseline/{region}`
+
+**Response**: [`InferThetaBaselineResponse`](schema.py)
+
+**Key Fields & Regional Semantics**:
+- **Output**: `region`, `rules` (normative thresholds), content-addressed `baseline_hash` (`sha256:...` aligned with HTTP `ETag`), `issued_at` (UNIX timestamp)
+- **Regional Coverage**: `US_FED` is populated and versioned. `EU_ECB` and `APAC_MAS` are reserved identifiers that return `HTTP 404` (`BASELINE_NOT_POPULATED`) so the adapter fails closed rather than silently reusing the `US_FED` ruleset.
+
+### Evidence Chain Endpoint: `POST /evidence-chain/{thread_id}`
+
+**Response**: [`InferThetaEvidenceResponse`](schema.py)
+
+**Key Fields & Idempotency**:
+- **Input**: `{"evidence_hash": "sha256:..."}` authenticated via `Authorization: Bearer <api_key>`
+- **Output**: `thread_id`, persisted `seal_hash` (64-char SHA-256 hex), `timestamp` (ISO-8601 UTC string or UNIX epoch)
+- **Idempotency**: Replaying the same `(thread_id, evidence_hash)` returns the identical `seal_hash` and original `timestamp`.
+
+---
+
+
+## Cryptographic Verification Workflow
+
+### 1. Trust Anchor Resolution (Out-of-Band JWKS)
+
+**Invariant**: **Never verify a signature against an embedded public key supplied by the signed document.**
+
+**Protocol**:
+1. Extract `kid` from `InferThetaInferenceResponse.kid`
+2. Fetch JWKS manifest from `PROVIDER_07_JWKS_URL` (cached with TTL)
+3. Resolve public key by `kid`:
+   - **If `kid` unknown**: Fail with `INFERTHETA_UNKNOWN_KEY`, set `admitted=False`
+   - **If `kid` found**: Extract Ed25519 public key (`x` parameter from JWK)
+
+**Example JWKS Response**:
+```json
+{
+  "keys": [
+    {
+      "kid": "infertheta-prod-ed25519-2026q3",
+      "kty": "OKP",
+      "crv": "Ed25519",
+      "x": "base64url_encoded_public_key"
+    }
+  ]
+}
+```
+
+### 2. Signature Verification
+
+1. **Canonical Serialization**: Serialize the response body **excluding** the `signature` field using **JCS (RFC 8785)** to produce a deterministic byte sequence.
+2. **Verify Ed25519 Signature**:
+   ```python
+   from cryptography.hazmat.primitives.asymmetric import ed25519
+
+   public_key.verify(signature_bytes, canonical_body_bytes)
+   ```
+3. **On Failure**: Fail with `SIGNATURE_VERIFICATION_FAILED`, set `admitted=False`
+
+### 3. Resolution vs. Verification Status
+
+**Critical Distinction**:
+- **Resolution Status**: Whether the HTTP request succeeded (200 OK) and returned parseable JSON
+- **Verification Status**: Whether the cryptographic signature is valid
+
+**A successful fetch proves receipt exists, NOT signature validity.**  
+Always return `verification_status=UNVERIFIED` until Ed25519 verification succeeds, then upgrade to `VERIFIED`.
+
+---
+
+## Bayesian Posterior Interpretation
+
+### Risk Score Aggregation
+
+The `posterior_risk_score` is a **weighted sum** of marginal probabilities for adverse events:
+
+```python
+posterior_risk_score = (
+    0.5 * marginal_probabilities["drawdown_gt_15pct"]
+    + 0.3 * marginal_probabilities["volatility_spike"]
+    + 0.2 * marginal_probabilities["liquidity_stress"]
+)
+```
+
+**Threshold Bands** (configured per region in baseline):
+- `< 0.20`: Low risk → likely `ALLOW`
+- `0.20–0.40`: Moderate risk → may `ESCALATE`
+- `≥ 0.40`: High risk → likely `REFUSE`
+
+### Utility Rankings
+
+Expected utility scores guide **counterfactual recommendations**:
+- If `action="rebalance_to_proposed"` has highest utility → `ALLOW`
+- If `action="defer_to_human"` dominates → `ESCALATE`
+- If `action="reject_trade"` dominates → `REFUSE`
+
+---
+
+## Testing Strategy
+
+### Unit Tests (Hermetic, `pytest.mark.unit + pytest.mark.local`)
+- Schema validation: Valid/invalid request/response payloads
+- Tri-state decision mapping: `ALLOW`/`REFUSE`/`ESCALATE` → `admitted` bool
+- Fail-closed error handling: Missing `authority_record_id`, unknown `kid`, malformed JSON
+
+### Integration Tests (`pytest.mark.integration`)
+- Mock HTTP server returning synthetic InferTheta responses
+- JWKS resolution and Ed25519 signature verification
+- Timeout and retry behavior
+
+### Live External Tests (`pytest.mark.live_external + pytest.mark.partner_integration`)
+- Real InferTheta production (`https://infertheta-cage-prod.onrender.com`) and staging (`https://infertheta-cage-staging.onrender.com`) environments
+- Out-of-band JWKS key resolution (`GET /.well-known/jwks.json`, production `kid = "infertheta-provider07-prod-2026-01"`, staging `kid = "infertheta-provider07-2026-01"`, multi-key rotation with 24h overlap)
+- Live baseline fetch (`GET /baseline/US_FED` with content-addressed `baseline_hash` + HTTP `ETag`, plus fail-closed verification for reserved `EU_ECB` / `APAC_MAS` regions)
+- Signed canonical test vector validation (`POST /infer` with RFC 8785 JCS + Ed25519 unpadded `base64url` signatures and minted `infertheta-ar-*` authority records)
+- Full enforcing adapter validation (`Provider07NormativeProvider.validate_fria`)
+- Live evidence-chain persistence, idempotent `(thread_id, evidence_hash)` replay, and Bearer auth enforcement (`POST /evidence-chain/{thread_id}`)
+- Live suite located in [`tests/integrations/provider_07/test_provider_07_live.py`](../../../tests/integrations/provider_07/test_provider_07_live.py)
+
+---
+
+## File Structure
+
+```
+src/integrations/provider_07/
+├── README.md                   ← This file
+├── __init__.py                 ← Package exports
+├── schema.py                   ← Pydantic v2 wire protocol models
+├── adapter.py                  ← NormativeProvider implementation
+├── jwks_client.py              ← Out-of-band JWKS fetcher
+└── signature.py                ← Ed25519 verification
+```
+
+---
+
+## References
+
+- **Canonical Schema**: [`docs/partners/provider_07/INFERTHETA_CANONICAL_SCHEMA.md`](../../../docs/partners/provider_07/INFERTHETA_CANONICAL_SCHEMA.md)
+- **NormativeProvider Seam**: [`src/gateway/governance/normative_provider.py`](../../gateway/governance/normative_provider.py)
+- **Adapter Architecture**: [`docs/architecture/EXTENSIBILITY_ARCHITECTURE.md`](../../../docs/architecture/EXTENSIBILITY_ARCHITECTURE.md)
+- **Import Boundary Enforcement**: [`scripts/check_import_boundaries.py`](../../../scripts/check_import_boundaries.py)
+- **Vendor Brand Isolation**: [`scripts/check_vendor_brands.py`](../../../scripts/check_vendor_brands.py)
+- **RFC 8785**: [JSON Canonicalization Scheme (JCS)](https://datatracker.ietf.org/doc/html/rfc8785)
+- **SEC Reg BI**: [Regulation Best Interest](https://www.sec.gov/rules/final/2019/34-86031.pdf)
+- **FINRA Rule 2111**: [Suitability](https://www.finra.org/rules-guidance/rulebooks/finra-rules/2111)
+
+---
+
+**Integration Status**:
+- ✅ Step 1 Wire Contract: Confirmed & validated against live staging
+- ✅ Step 1 Dedicated Suitability Graph: Calibrated & deployed on Render
+- ✅ Step 2 Cryptographic Hardening: Ed25519 signatures (RFC 8785 JCS), out-of-band JWKS (`kid = "infertheta-provider07-2026-01"`), and minted `authority_record_id` (`infertheta-ar-<uuid4>`) verified live against staging
+- ✅ Step 3 Production-Readiness Increment: `POST /evidence-chain/{thread_id}` (persisted & idempotent), content-addressed `US_FED` `baseline_hash` + HTTP `ETag`, fail-closed reserved regions (`EU_ECB`, `APAC_MAS`), and 24h overlap multi-key JWKS rotation verified live against staging
+- ✅ Step 4 Production Cutover: Isolated production instance (`https://infertheta-cage-prod.onrender.com`), dedicated PostgreSQL persistence, production JWKS (`kid = "infertheta-provider07-prod-2026-01"`), and GKE `provider-07-credentials` wiring verified over the wire
+
+
+

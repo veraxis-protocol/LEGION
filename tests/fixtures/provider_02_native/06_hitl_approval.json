@@ -1,0 +1,190 @@
+{
+  "bundleId": "af192604-f146-4ad5-a1c5-b4a3da57c694",
+  "threadId": "hitl-approval-path",
+  "steps": [
+    {
+      "stepId": "5288c3a3-36f4-4212-b191-a01d7fed953e",
+      "nodeName": "nemo_guardrail",
+      "parentStepIds": [],
+      "timestampUtc": "2026-10-04T21:38:02.332117+00:00",
+      "durationMs": 0.017417012713849545,
+      "signals": {
+        "governanceSignature": "sig_pre_hitl",
+        "safetyStatus": "APPROVED",
+        "riskStatus": "APPROVED",
+        "loopCount": 0
+      },
+      "metadata": {
+        "loopIteration": 0,
+        "threadId": "hitl-approval-path",
+        "stateHashAlg": "sha256",
+        "stateHashCanon": "RFC8785-JCS",
+        "stateHashScope": "agentstate-pii-sanitized/v1"
+      },
+      "stateHash": "ce0d0bdeba8ef5154a27c4b2f6dc8e9a843562033e77c26a332e7d33678a005b"
+    },
+    {
+      "stepId": "6aeae7e7-9834-4151-9b0e-c385c9f86f30",
+      "nodeName": "evaluator",
+      "parentStepIds": [
+        "5288c3a3-36f4-4212-b191-a01d7fed953e"
+      ],
+      "timestampUtc": "2026-10-04T21:38:02.332147+00:00",
+      "durationMs": 0.001667009200900793,
+      "signals": {
+        "governanceSignature": "sig_pre_hitl",
+        "safetyStatus": "APPROVED",
+        "riskStatus": "APPROVED",
+        "loopCount": 0
+      },
+      "metadata": {
+        "loopIteration": 0,
+        "threadId": "hitl-approval-path",
+        "stateHashAlg": "sha256",
+        "stateHashCanon": "RFC8785-JCS",
+        "stateHashScope": "agentstate-pii-sanitized/v1"
+      },
+      "stateHash": "ce0d0bdeba8ef5154a27c4b2f6dc8e9a843562033e77c26a332e7d33678a005b"
+    },
+    {
+      "stepId": "695c54fb-d098-4108-9741-e85bf07ce76e",
+      "nodeName": "safety_check",
+      "parentStepIds": [
+        "6aeae7e7-9834-4151-9b0e-c385c9f86f30"
+      ],
+      "timestampUtc": "2026-10-04T21:38:02.332164+00:00",
+      "durationMs": 0.001500011421740055,
+      "signals": {
+        "governanceSignature": "sig_pre_hitl",
+        "safetyStatus": "APPROVED",
+        "riskStatus": "APPROVED",
+        "loopCount": 0
+      },
+      "metadata": {
+        "loopIteration": 0,
+        "threadId": "hitl-approval-path",
+        "stateHashAlg": "sha256",
+        "stateHashCanon": "RFC8785-JCS",
+        "stateHashScope": "agentstate-pii-sanitized/v1"
+      },
+      "stateHash": "ce0d0bdeba8ef5154a27c4b2f6dc8e9a843562033e77c26a332e7d33678a005b"
+    },
+    {
+      "stepId": "e1cbadc9-78af-45e2-9b38-7ccb5ad1764c",
+      "nodeName": "hitl_interrupt",
+      "parentStepIds": [
+        "695c54fb-d098-4108-9741-e85bf07ce76e"
+      ],
+      "timestampUtc": "2026-10-04T21:38:02.332184+00:00",
+      "durationMs": 0.0,
+      "signals": {
+        "hitlApproval": {
+          "approved": true,
+          "reviewer": "reviewer@example.com",
+          "rationale": "Trade within acceptable parameters",
+          "timestamp": "2026-10-04T12:00:00Z"
+        },
+        "interruptType": "HITL_MANUAL_REVIEW",
+        "approvalRequired": true
+      },
+      "metadata": {
+        "threadId": "hitl-approval-path",
+        "interruptNode": "governed_trader",
+        "stateHashAlg": "sha256",
+        "stateHashCanon": "RFC8785-JCS",
+        "stateHashScope": "agentstate-pii-sanitized/v1"
+      },
+      "stateHash": "9792487b749c562cc39c2b71d94f9e5f99bb99179438c4d9844cfc9cff23c3fe"
+    },
+    {
+      "stepId": "6616a520-f9b3-447d-8698-34967e7989cb",
+      "nodeName": "governed_trader",
+      "parentStepIds": [
+        "e1cbadc9-78af-45e2-9b38-7ccb5ad1764c"
+      ],
+      "timestampUtc": "2026-10-04T21:38:02.332381+00:00",
+      "durationMs": 0.002207991201430559,
+      "signals": {
+        "governanceSignature": "sig_hitl_approved",
+        "safetyStatus": "APPROVED",
+        "riskStatus": "APPROVED",
+        "hitlApproval": {
+          "approved": true,
+          "reviewer": "reviewer@example.com",
+          "rationale": "Trade within acceptable parameters",
+          "timestamp": "2026-10-04T12:00:00Z"
+        },
+        "loopCount": 0
+      },
+      "metadata": {
+        "loopIteration": 0,
+        "threadId": "hitl-approval-path",
+        "stateHashAlg": "sha256",
+        "stateHashCanon": "RFC8785-JCS",
+        "stateHashScope": "agentstate-pii-sanitized/v1"
+      },
+      "stateHash": "9792487b749c562cc39c2b71d94f9e5f99bb99179438c4d9844cfc9cff23c3fe"
+    },
+    {
+      "stepId": "388895c3-a01a-4c44-ae84-eb4dedb3600f",
+      "nodeName": "explainer",
+      "parentStepIds": [
+        "6616a520-f9b3-447d-8698-34967e7989cb"
+      ],
+      "timestampUtc": "2026-10-04T21:38:02.332405+00:00",
+      "durationMs": 0.00204198295250535,
+      "signals": {
+        "governanceSignature": "sig_hitl_approved",
+        "safetyStatus": "APPROVED",
+        "riskStatus": "APPROVED",
+        "hitlApproval": {
+          "approved": true,
+          "reviewer": "reviewer@example.com",
+          "rationale": "Trade within acceptable parameters",
+          "timestamp": "2026-10-04T12:00:00Z"
+        },
+        "loopCount": 0
+      },
+      "metadata": {
+        "loopIteration": 0,
+        "threadId": "hitl-approval-path",
+        "stateHashAlg": "sha256",
+        "stateHashCanon": "RFC8785-JCS",
+        "stateHashScope": "agentstate-pii-sanitized/v1"
+      },
+      "stateHash": "9792487b749c562cc39c2b71d94f9e5f99bb99179438c4d9844cfc9cff23c3fe"
+    },
+    {
+      "stepId": "9b421071-1857-49c5-9b9b-8145025af895",
+      "nodeName": "nemo_output_rail",
+      "parentStepIds": [
+        "388895c3-a01a-4c44-ae84-eb4dedb3600f"
+      ],
+      "timestampUtc": "2026-10-04T21:38:02.332422+00:00",
+      "durationMs": 0.001292035449296236,
+      "signals": {
+        "governanceSignature": "sig_hitl_approved",
+        "safetyStatus": "APPROVED",
+        "riskStatus": "APPROVED",
+        "hitlApproval": {
+          "approved": true,
+          "reviewer": "reviewer@example.com",
+          "rationale": "Trade within acceptable parameters",
+          "timestamp": "2026-10-04T12:00:00Z"
+        },
+        "loopCount": 0
+      },
+      "metadata": {
+        "loopIteration": 0,
+        "threadId": "hitl-approval-path",
+        "stateHashAlg": "sha256",
+        "stateHashCanon": "RFC8785-JCS",
+        "stateHashScope": "agentstate-pii-sanitized/v1"
+      },
+      "stateHash": "9792487b749c562cc39c2b71d94f9e5f99bb99179438c4d9844cfc9cff23c3fe"
+    }
+  ],
+  "startedAt": "2026-10-04T21:38:02.332083+00:00",
+  "completedAt": "2026-10-04T21:38:02.335676+00:00",
+  "terminalPath": "happy_path"
+}

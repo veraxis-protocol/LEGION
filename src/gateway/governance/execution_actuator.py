@@ -1,0 +1,344 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""
+ExecutionActuator protocol and supporting types for downstream execution boundary.
+
+CAGE is the ISSUER, not the consumer. This is a fundamentally different trust
+boundary from the upstream NormativeProvider/AttestationProvider seams.
+
+BREAKING CHANGE (C0): ExecutionActuator, ExecutionClearance, ActuationReceipt,
+and ActuatorCapability have been moved to src.gateway.governance.seams.actuation
+to eliminate circular dependencies with vendor adapters. This module now
+re-exports them for backward compatibility, but the re-export will be removed
+in the same PR per the C0 specification.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from datetime import datetime, timezone
+from typing import Any
+
+# Re-export seam contracts for backward compatibility during transition.
+# New code should import directly from seams.actuation.
+from src.gateway.governance.seams.actuation import (
+    ActuationOutcome,
+    ActuationReceipt,
+    ActuatorCapability,
+    ExecutionActuator,
+    ExecutionClearance,
+    ReceiptVerification,
+)
+
+logger = logging.getLogger("Gateway.Governance.ExecutionActuator")
+
+__all__ = [
+    "ActuationOutcome",
+    "ActuationReceipt",
+    "ActuatorCapability",
+    "ActuatorRegistry",
+    "ExecutionActuator",
+    "ExecutionClearance",
+    "ReceiptVerification",
+    "dispatch_actuation",
+    "get_actuator_registry",
+    "ingest_actuation_receipt",
+    "load_actuators_from_env",
+]
+
+_EVENT_TYPE_BY_OUTCOME: dict[ActuationOutcome, str] = {
+    ActuationOutcome.ACCEPTED: "ACTUATION_RECEIPT",
+    ActuationOutcome.REJECTED: "ACTUATION_REFUSAL_RECEIPT",
+    ActuationOutcome.UNKNOWN: "ACTUATION_INDETERMINATE_RECEIPT",
+}
+
+
+async def dispatch_actuation(
+    actuator: ExecutionActuator,
+    clearance: ExecutionClearance,
+) -> ActuationReceipt:
+    """Actuate through the kernel boundary and record the receipt exactly once.
+
+    This is the only sanctioned way to invoke ``ExecutionActuator.actuate()``.
+    Actuators never write evidence themselves, so every receipt — accepted,
+    refused, or indeterminate — enters the hash-chained stream from this one
+    place. An exception raised by the actuator is not proof the side effect
+    did not happen, so it is converted into an ``UNKNOWN``, non-retryable
+    receipt rather than propagated.
+    """
+    try:
+        receipt = await actuator.actuate(clearance)
+    except Exception as exc:
+        logger.error(
+            "[ExecutionActuator] %s raised during actuate (outcome UNKNOWN): %s",
+            actuator.actuator_id,
+            exc,
+        )
+        receipt = ActuationReceipt(
+            accepted=False,
+            receipt_id=None,
+            session_uuid=None,
+            raw_receipt=None,
+            findings=[
+                {
+                    "code": "ACTUATOR_EXCEPTION",
+                    "severity": "TERMINAL",
+                    "detail": f"{type(exc).__name__}: {exc}",
+                }
+            ],
+            retryable=False,
+            timestamp_utc=datetime.now(tz=timezone.utc).isoformat(),
+            outcome=ActuationOutcome.UNKNOWN,
+        )
+    await ingest_actuation_receipt(clearance, receipt, actuator_id=actuator.actuator_id)
+    return receipt
+
+
+async def ingest_actuation_receipt(
+    clearance: ExecutionClearance,
+    receipt: ActuationReceipt,
+    *,
+    actuator_id: str | None = None,
+) -> str | None:
+    """Emit an ``ActuationReceipt`` to the evidence stream; return its msg id.
+
+    Called by ``dispatch_actuation()``; not by actuators. Refusal receipts
+    (including ``CREDENTIAL_BROKER_FAILED``, ``EXECUTOR_ID_MISMATCH``, and
+    ``TARGET_ROUTE_MISMATCH``) are recorded as ``ACTUATION_REFUSAL_RECEIPT``;
+    accepted receipts as ``ACTUATION_RECEIPT``; indeterminate ones (the side
+    effect may have happened) as ``ACTUATION_INDETERMINATE_RECEIPT``. The
+    receipt's signature ``verification`` status is recorded alongside.
+    """
+    from src.gateway.governance.evidence.stream import get_evidence_sink
+
+    # ActuationReceipt.__post_init__ always derives an outcome; UNKNOWN is the
+    # fail-closed reading should one ever be missing.
+    outcome = receipt.outcome or ActuationOutcome.UNKNOWN
+    event_type = _EVENT_TYPE_BY_OUTCOME[outcome]
+    finding_codes = [
+        str(f.get("code", ""))
+        for f in (receipt.findings or [])
+        if isinstance(f, dict) and f.get("code")
+    ]
+    event: dict[str, Any] = {
+        "type": event_type,
+        "controlId": "AC-3",
+        "accepted": bool(receipt.accepted),
+        "outcome": outcome.value,
+        "verification": receipt.verification.value,
+        "actuator_id": actuator_id or clearance.executor_id,
+        "thread_id": clearance.thread_id,
+        "action": clearance.action,
+        "target": clearance.target,
+        "operator_urn": clearance.operator_urn,
+        "executor_id": clearance.executor_id,
+        "target_route": clearance.target_route,
+        "correlation_id": clearance.correlation_id,
+        "governance_decision_digest": clearance.governance_decision_digest,
+        "receipt_id": receipt.receipt_id,
+        "session_uuid": receipt.session_uuid,
+        "findings": list(receipt.findings or []),
+        "finding_codes": finding_codes,
+        "retryable": bool(receipt.retryable),
+        "envelope_digest": receipt.envelope_digest,
+        "timestamp_utc": receipt.timestamp_utc
+        or datetime.now(tz=timezone.utc).isoformat(),
+    }
+
+    try:
+        sink = get_evidence_sink()
+        return await sink.ingest(event)
+    except Exception as exc:
+        logger.error(
+            "[ExecutionActuator] Failed to ingest %s for action=%s thread_id=%s: %s",
+            event_type,
+            clearance.action,
+            clearance.thread_id,
+            exc,
+        )
+        return None
+
+
+def _load_actuator(name: str) -> ExecutionActuator:
+    """Lazy-load execution actuator by name.
+
+    Args:
+        name: Actuator name (actuator_01, actuator_02, actuator_03).
+
+    Returns:
+        Instantiated ExecutionActuator.
+
+    Raises:
+        ValueError: Unknown actuator name.
+        Exception: Actuator.from_env() configuration errors propagate.
+    """
+    normalized = name.strip().lower()
+
+    if normalized in ("actuator_01", "a01", "archytan"):
+        from src.integrations.actuator_01.adapter import Actuator01Adapter
+
+        return Actuator01Adapter.from_env()
+
+    if normalized in ("actuator_02", "a02", "openshell"):
+        from src.integrations.actuator_02.adapter import Actuator02Adapter
+
+        return Actuator02Adapter.from_env()
+
+    if normalized in ("actuator_03", "a03", "sentry", "doca_quarantine"):
+        from src.integrations.actuator_03.adapter import Actuator03Adapter
+
+        return Actuator03Adapter.from_env()
+
+    raise ValueError(
+        f"Unknown execution actuator: '{name}'. Supported: actuator_01, actuator_02, actuator_03"
+    )
+
+
+class ActuatorRegistry:
+    """
+    Registry of ExecutionActuator instances.
+
+    Unlike NormativeProvider's singleton, this supports N registered actuators
+    dispatched by claim (which actions each actuator handles).
+
+    The registry shape is fixed now so a second actuator does not force a refactor.
+    """
+
+    def __init__(self) -> None:
+        self._actuators: dict[str, ExecutionActuator] = {}
+        self._claims: dict[str, set[str]] = {}  # actuator_id -> set of action patterns
+
+    def register(
+        self,
+        actuator: ExecutionActuator,
+        claims: set[str] | None = None,
+    ) -> None:
+        """
+        Register an actuator.
+
+        Args:
+            actuator: The ExecutionActuator instance
+            claims: Set of action patterns this actuator handles (e.g., {"trade.*", "transfer.*"})
+                   If None, the actuator handles all actions (default for the first actuator)
+        """
+        actuator_id = actuator.actuator_id
+        if actuator_id in self._actuators:
+            raise ValueError(f"Actuator {actuator_id} already registered")
+
+        if not isinstance(actuator, ExecutionActuator):
+            raise TypeError(
+                f"Actuator must implement ExecutionActuator protocol, got {type(actuator)}"
+            )
+
+        self._actuators[actuator_id] = actuator
+        self._claims[actuator_id] = claims if claims is not None else {"*"}
+
+    def get_actuator(self, action: str) -> ExecutionActuator | None:
+        """
+        Retrieve the actuator that handles the given action.
+
+        Returns the first matching actuator, or None if no actuator claims it.
+        """
+        for actuator_id, patterns in self._claims.items():
+            if "*" in patterns:
+                return self._actuators[actuator_id]
+            # Simple prefix matching for now
+            for pattern in patterns:
+                if pattern.endswith("*") and action.startswith(pattern[:-1]):
+                    return self._actuators[actuator_id]
+                elif action == pattern:
+                    return self._actuators[actuator_id]
+        return None
+
+    def list_actuators(self) -> list[str]:
+        """Return list of registered actuator IDs."""
+        return list(self._actuators.keys())
+
+
+# ── Thread-safe singleton accessor ──
+
+import threading
+
+_actuator_registry_singleton: ActuatorRegistry | None = None
+_actuator_registry_lock = threading.Lock()
+
+
+def get_actuator_registry() -> ActuatorRegistry:
+    """
+    Retrieve the global ActuatorRegistry singleton.
+
+    Thread-safe singleton accessor for the ActuatorRegistry.
+    Creates the registry on first access.
+
+    Returns:
+        The global ActuatorRegistry instance.
+    """
+    global _actuator_registry_singleton
+    if _actuator_registry_singleton is None:
+        with _actuator_registry_lock:
+            if _actuator_registry_singleton is None:
+                _actuator_registry_singleton = ActuatorRegistry()
+    return _actuator_registry_singleton
+
+
+def load_actuators_from_env(
+    registry: ActuatorRegistry | None = None,
+) -> ActuatorRegistry:
+    """Load actuators from CAGE_ACTIVE_ACTUATORS environment variable.
+
+    Reads:
+        CAGE_ACTIVE_ACTUATORS: Comma-separated list of actuator names
+            (e.g., "actuator_01,archytan"). Empty or unset -> no-op.
+
+    Args:
+        registry: Target registry (defaults to global singleton).
+
+    Returns:
+        The registry (for chaining).
+
+    Raises:
+        ValueError: Unknown actuator name or duplicate registration.
+        Exception: Actuator configuration errors propagate (fail-closed).
+    """
+    if registry is None:
+        registry = get_actuator_registry()
+
+    actuator_names_raw = os.getenv("CAGE_ACTIVE_ACTUATORS", "").strip()
+
+    # Hermetic default: return registry unmodified
+    if not actuator_names_raw:
+        logger.info("CAGE_ACTIVE_ACTUATORS unset or empty; no actuators loaded")
+        return registry
+
+    # Split on comma, strip whitespace, ignore empty tokens
+    actuator_names = [
+        name.strip() for name in actuator_names_raw.split(",") if name.strip()
+    ]
+
+    # Lazy-load and register each actuator
+    loaded_ids: list[str] = []
+    for name in actuator_names:
+        actuator = _load_actuator(name)
+        registry.register(actuator)
+        loaded_ids.append(actuator.actuator_id)
+
+    logger.info(
+        "Loaded %d execution actuator(s): %s",
+        len(loaded_ids),
+        ", ".join(loaded_ids),
+    )
+
+    return registry

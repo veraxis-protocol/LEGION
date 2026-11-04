@@ -1,0 +1,86 @@
+{
+  "episodes": [
+    {
+      "effects": 0,
+      "name": "SYN-GAIA-A2A",
+      "same_bytes_replay": true,
+      "status": "PASS"
+    },
+    {
+      "effects": 1,
+      "name": "SYN-GAIA-ADA",
+      "same_bytes_replay": true,
+      "status": "PASS"
+    },
+    {
+      "effects": 0,
+      "name": "SYN-GAIA-AMB",
+      "same_bytes_replay": true,
+      "status": "PASS"
+    },
+    {
+      "effects": 1,
+      "name": "SYN-GAIA-EXE",
+      "same_bytes_replay": true,
+      "status": "PASS"
+    },
+    {
+      "effects": 1,
+      "name": "SYN-GAIA-NOI",
+      "same_bytes_replay": true,
+      "status": "PASS"
+    },
+    {
+      "effects": 0,
+      "name": "SYN-GAIA-SEA",
+      "same_bytes_replay": true,
+      "status": "PASS"
+    },
+    {
+      "effects": 1,
+      "name": "SYN-GAIA-TIM",
+      "same_bytes_replay": true,
+      "status": "PASS"
+    },
+    {
+      "effects": 1,
+      "name": "SYN-OTEL-01",
+      "same_bytes_replay": true,
+      "status": "PASS"
+    },
+    {
+      "effects": 1,
+      "name": "SYN-OTEL-02",
+      "same_bytes_replay": true,
+      "status": "PASS"
+    },
+    {
+      "effects": 1,
+      "name": "SYN-OTEL-03",
+      "same_bytes_replay": true,
+      "status": "PASS"
+    },
+    {
+      "effects": 1,
+      "name": "SYN-OTEL-04",
+      "same_bytes_replay": true,
+      "status": "PASS"
+    },
+    {
+      "effects": 1,
+      "name": "SYN-OTEL-05",
+      "same_bytes_replay": true,
+      "status": "PASS"
+    },
+    {
+      "effects": 0,
+      "name": "SYN-OTEL-06",
+      "same_bytes_replay": true,
+      "status": "PASS"
+    }
+  ],
+  "exact_replay_equal": true,
+  "kind": "INDEPENDENT_CLI_SUBPROCESS_REPLAY",
+  "live_LEGION_VCC_measured": false,
+  "passed": 13
+}

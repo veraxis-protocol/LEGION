@@ -1,0 +1,568 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Hermetic test suite for CageClient SDK core functionality.
+
+All tests run without live external gateway or vendor SDK dependencies.
+Mocking uses respx for HTTP/2 interception and unittest.mock for crypto.
+"""
+
+import json
+from datetime import datetime, timedelta, timezone
+
+import httpx
+import pytest
+import respx
+
+from src.gateway.client.core import CageClient
+from src.gateway.client.envelope import GovernanceEnvelope
+from src.gateway.client.exceptions import (
+    CageGatewayError,
+    DeferralPending,
+    PolicyViolationException,
+)
+
+pytestmark = [pytest.mark.unit, pytest.mark.local, pytest.mark.asyncio]
+
+
+@pytest.fixture
+def mock_gateway_url() -> str:
+    """Mock gateway base URL for hermetic tests."""
+    return "https://mock-cage-gateway.example.com"
+
+
+@pytest.fixture
+async def cage_client(mock_gateway_url: str, monkeypatch):
+    """Create CageClient instance for hermetic testing with mocked transport."""
+
+    # Mock create_mtls_transport to return a simple httpx.HTTPTransport without h2
+    def mock_create_mtls_transport(*args, **kwargs):
+        return httpx.HTTPTransport()
+
+    monkeypatch.setattr(
+        "src.gateway.client.transport.create_mtls_transport", mock_create_mtls_transport
+    )
+
+    # Also disable http2 in the client initialization by patching AsyncClient
+    original_async_client = httpx.AsyncClient
+
+    def patched_async_client(*args, **kwargs):
+        # Force http2=False to avoid h2 dependency
+        kwargs["http2"] = False
+        return original_async_client(*args, **kwargs)
+
+    monkeypatch.setattr("httpx.AsyncClient", patched_async_client)
+
+    client = CageClient(
+        gateway_url=mock_gateway_url,
+        timeout_s=5.0,
+    )
+    yield client
+    await client.aclose()
+
+
+def create_mock_allow_envelope() -> dict:
+    """Create mock ALLOW governance envelope with ISO timestamp strings."""
+    now_str = "2026-09-18T20:00:00+00:00"
+    expires_str = "2026-09-18T20:05:00+00:00"
+
+    return {
+        "envelope_version": "3.0",
+        "envelope_type": "cage_governance_decision",
+        "issued_at": now_str,
+        "expires_at": expires_str,
+        "issuer": {
+            "service": "cage-gateway",
+            "instance_id": "test-instance-001",
+            "region": "us-central1",
+        },
+        "subject": {
+            "action": "execute_trade",
+            "action_hash": "abc123",
+            "record_hash": "def456",
+            "agent_id": "test-agent",
+        },
+        "governance_context": {
+            "policy_version": "1.0",
+            "tiers_passed": ["tier_1", "tier_2"],
+        },
+        "payload": {
+            "decision": "ALLOW",
+            "execution_token": "mock-token-123",
+        },
+        "signature": {
+            "algorithm": "RS256",
+            "value": "mock-signature-base64",
+            "kid": "test-key-001",
+        },
+    }
+
+
+@respx.mock
+async def test_validate_action_allow(
+    cage_client: CageClient,
+    mock_gateway_url: str,
+):
+    """Test successful ALLOW response returns frozen GovernanceEnvelope."""
+    # Mock ALLOW response
+    envelope_data = create_mock_allow_envelope()
+    response_body = {"envelope": envelope_data}
+
+    # Mock HTTP endpoint
+    mock_route = respx.post(f"{mock_gateway_url}/governance/validate-action").mock(
+        return_value=httpx.Response(
+            status_code=200,
+            json=response_body,
+        )
+    )
+
+    # Execute validation
+    result = await cage_client.validate_action(
+        action="execute_trade",
+        parameters={"symbol": "AAPL", "amount": 1000},
+        agent_id="test-agent",
+        context={"session_id": "test-session"},
+    )
+
+    # Assertions
+    assert isinstance(result, GovernanceEnvelope)
+    assert result.envelope_version == "3.0"
+    assert result.envelope_type == "cage_governance_decision"
+    assert result.payload["decision"] == "ALLOW"
+    assert result.subject["action"] == "execute_trade"
+    assert result.subject["agent_id"] == "test-agent"
+
+    # Verify envelope is frozen (immutable) - test the model itself
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        result.envelope_version = "4.0"  # type: ignore
+
+    # Verify request was made with both params and parameters
+    assert mock_route.called
+    assert mock_route.call_count == 1
+    sent_payload = json.loads(mock_route.calls.last.request.content)
+    assert sent_payload["params"] == {"symbol": "AAPL", "amount": 1000}
+    assert sent_payload["parameters"] == {"symbol": "AAPL", "amount": 1000}
+
+
+@respx.mock
+async def test_validate_action_deny_raises_policy_violation(
+    cage_client: CageClient,
+    mock_gateway_url: str,
+):
+    """Test DENY response raises PolicyViolationException with structured details."""
+    # Mock DENY response
+    response_body = {
+        "reason_code": "TIER_3_BLOCKED",
+        "details": {
+            "failed_tier": "tier_3",
+            "policy_rule": "high_value_trade_limit",
+            "evidence": "Trade amount exceeds $10,000 threshold",
+            "suggested_alternatives": ["reduce_amount", "request_approval"],
+        },
+        "audit_id": "audit-12345",
+        "recoverable": True,
+    }
+
+    respx.post(f"{mock_gateway_url}/governance/validate-action").mock(
+        return_value=httpx.Response(
+            status_code=403,
+            json=response_body,
+        )
+    )
+
+    # Execute validation and assert exception
+    with pytest.raises(PolicyViolationException) as exc_info:
+        await cage_client.validate_action(
+            action="execute_trade",
+            parameters={"symbol": "AAPL", "amount": 50000},
+            agent_id="test-agent",
+        )
+
+    # Verify exception attributes
+    exc = exc_info.value
+    assert exc.reason_code == "TIER_3_BLOCKED"
+    assert exc.audit_id == "audit-12345"
+    assert exc.recoverable is True
+    assert exc.violation_details["failed_tier"] == "tier_3"
+    assert exc.violation_details["policy_rule"] == "high_value_trade_limit"
+    assert "suggested_alternatives" in exc.violation_details
+    assert "reduce_amount" in exc.violation_details["suggested_alternatives"]
+
+
+@respx.mock
+async def test_validate_action_defer_raises_deferral_pending(
+    cage_client: CageClient,
+    mock_gateway_url: str,
+):
+    """Test DEFER response raises DeferralPending with ticket_id."""
+    # Mock DEFER response
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=4)
+    response_body = {
+        "ticket_id": "defer-ticket-789",
+        "reason": "High-value trade requires manual approval",
+        "expires_at": expires_at.isoformat(),
+        "ttl_seconds": 14400,
+    }
+
+    respx.post(f"{mock_gateway_url}/governance/validate-action").mock(
+        return_value=httpx.Response(
+            status_code=202,
+            json=response_body,
+        )
+    )
+
+    # Execute validation and assert exception
+    with pytest.raises(DeferralPending) as exc_info:
+        await cage_client.validate_action(
+            action="execute_trade",
+            parameters={"symbol": "GOOGL", "amount": 100000},
+            agent_id="test-agent",
+        )
+
+    # Verify exception attributes
+    exc = exc_info.value
+    assert exc.ticket_id == "defer-ticket-789"
+    assert exc.defer_reason == "High-value trade requires manual approval"
+    assert exc.ttl_seconds == 14400
+    assert isinstance(exc.expires_at, datetime)
+    # Verify expires_at is in the future
+    assert exc.expires_at > datetime.now(timezone.utc)
+
+
+@respx.mock
+async def test_validate_action_transport_failure_fails_closed(
+    cage_client: CageClient,
+    mock_gateway_url: str,
+):
+    """Test connection timeout/500 errors fail closed with CageGatewayError."""
+    # Test 1: Connection timeout (network failure)
+    respx.post(f"{mock_gateway_url}/governance/validate-action").mock(
+        side_effect=httpx.ConnectTimeout("Connection timed out")
+    )
+
+    with pytest.raises(CageGatewayError) as exc_info:
+        await cage_client.validate_action(
+            action="execute_trade",
+            parameters={"symbol": "TSLA", "amount": 5000},
+            agent_id="test-agent",
+        )
+
+    assert "Failed to reach CAGE Gateway" in str(exc_info.value)
+
+    # Test 2: 500 Internal Server Error (fail-closed)
+    respx.post(f"{mock_gateway_url}/governance/validate-action").mock(
+        return_value=httpx.Response(
+            status_code=500,
+            text="Internal Server Error",
+        )
+    )
+
+    with pytest.raises(CageGatewayError) as exc_info:
+        await cage_client.validate_action(
+            action="execute_trade",
+            parameters={"symbol": "AMZN", "amount": 3000},
+            agent_id="test-agent",
+        )
+
+    assert "Gateway server error" in str(exc_info.value)
+    assert "500" in str(exc_info.value)
+
+
+def test_routing_seal_secret_rejected(mock_gateway_url: str):
+    """Test CageClient no longer accepts routing_seal_secret parameter."""
+    with pytest.raises(TypeError):
+        CageClient(
+            gateway_url=mock_gateway_url,
+            routing_seal_secret="legacy-secret",  # type: ignore[call-arg]
+        )
+
+
+@respx.mock
+async def test_deny_response_missing_audit_id_fails_closed(
+    cage_client: CageClient,
+    mock_gateway_url: str,
+):
+    """Test DENY response without audit_id fails closed with CageGatewayError."""
+    # Mock malformed DENY response (no audit_id)
+    response_body = {
+        "reason_code": "UNKNOWN_ERROR",
+        "details": {},
+        # Missing audit_id field
+        "recoverable": True,
+    }
+
+    respx.post(f"{mock_gateway_url}/governance/validate-action").mock(
+        return_value=httpx.Response(
+            status_code=403,
+            json=response_body,
+        )
+    )
+
+    # Execute validation and assert CageGatewayError
+    with pytest.raises(CageGatewayError) as exc_info:
+        await cage_client.validate_action(
+            action="execute_trade",
+            parameters={"symbol": "META", "amount": 7500},
+            agent_id="test-agent",
+        )
+
+    assert "missing required 'audit_id' field" in str(exc_info.value)
+
+
+@respx.mock
+async def test_defer_response_missing_ticket_id_fails_closed(
+    cage_client: CageClient,
+    mock_gateway_url: str,
+):
+    """Test DEFER response without ticket_id fails closed with CageGatewayError."""
+    # Mock malformed DEFER response (no ticket_id)
+    response_body = {
+        "reason": "Requires approval",
+        "ttl_seconds": 14400,
+        # Missing ticket_id field
+    }
+
+    respx.post(f"{mock_gateway_url}/governance/validate-action").mock(
+        return_value=httpx.Response(
+            status_code=202,
+            json=response_body,
+        )
+    )
+
+    # Execute validation and assert CageGatewayError
+    with pytest.raises(CageGatewayError) as exc_info:
+        await cage_client.validate_action(
+            action="execute_trade",
+            parameters={"symbol": "NFLX", "amount": 4000},
+            agent_id="test-agent",
+        )
+
+    assert "missing required 'ticket_id' field" in str(exc_info.value)
+
+
+@respx.mock
+async def test_allow_response_missing_envelope_fails_closed(
+    cage_client: CageClient,
+    mock_gateway_url: str,
+):
+    """Test ALLOW response without envelope field fails closed."""
+    # Mock malformed ALLOW response (no envelope)
+    response_body = {
+        "status": "success",
+        # Missing envelope field
+    }
+
+    respx.post(f"{mock_gateway_url}/governance/validate-action").mock(
+        return_value=httpx.Response(
+            status_code=200,
+            json=response_body,
+        )
+    )
+
+    # Execute validation and assert CageGatewayError
+    with pytest.raises(CageGatewayError) as exc_info:
+        await cage_client.validate_action(
+            action="execute_trade",
+            parameters={"symbol": "ORCL", "amount": 2500},
+            agent_id="test-agent",
+        )
+
+    assert "missing required 'envelope' field" in str(exc_info.value)
+
+
+@respx.mock
+async def test_unexpected_status_code_fails_closed(
+    cage_client: CageClient,
+    mock_gateway_url: str,
+):
+    """Test unexpected HTTP status code fails closed."""
+    # Mock 418 I'm a teapot (unexpected status)
+    respx.post(f"{mock_gateway_url}/governance/validate-action").mock(
+        return_value=httpx.Response(
+            status_code=418,
+            text="I'm a teapot",
+        )
+    )
+
+    # Execute validation and assert CageGatewayError
+    with pytest.raises(CageGatewayError) as exc_info:
+        await cage_client.validate_action(
+            action="execute_trade",
+            parameters={"symbol": "IBM", "amount": 1000},
+            agent_id="test-agent",
+        )
+
+    assert "Unexpected gateway response" in str(exc_info.value)
+    assert "418" in str(exc_info.value)
+
+
+async def test_client_context_manager_lifecycle(mock_gateway_url: str, monkeypatch):
+    """Test CageClient async context manager properly opens and closes."""
+
+    # Mock transport to avoid h2 dependency
+    def mock_create_mtls_transport(*args, **kwargs):
+        return httpx.HTTPTransport()
+
+    monkeypatch.setattr(
+        "src.gateway.client.transport.create_mtls_transport", mock_create_mtls_transport
+    )
+
+    # Patch AsyncClient to disable http2
+    original_async_client = httpx.AsyncClient
+
+    def patched_async_client(*args, **kwargs):
+        kwargs["http2"] = False
+        return original_async_client(*args, **kwargs)
+
+    monkeypatch.setattr("httpx.AsyncClient", patched_async_client)
+
+    async with CageClient(gateway_url=mock_gateway_url) as client:
+        assert client._client is not None
+        # Verify client was initialized (can't use isinstance due to monkeypatch)
+        assert hasattr(client._client, "aclose")
+
+    # After context exit, client should be closed
+
+
+def test_parameter_canonicalization():
+    """Test parameter canonicalization produces deterministic JSON."""
+    # Test 1: Key ordering
+    params1 = {"z": 3, "a": 1, "m": 2}
+    params2 = {"a": 1, "m": 2, "z": 3}
+
+    canon1 = CageClient._canonicalize_params(params1)
+    canon2 = CageClient._canonicalize_params(params2)
+
+    assert canon1 == canon2
+    assert canon1 == '{"a":1,"m":2,"z":3}'
+
+    # Test 2: Nested structures
+    params3 = {"nested": {"b": 2, "a": 1}, "top": "value"}
+    canon3 = CageClient._canonicalize_params(params3)
+    assert '{"nested":{"a":1,"b":2},"top":"value"}' == canon3
+
+
+@respx.mock
+async def test_validate_action_top_level_envelope_with_envelope_id(
+    cage_client: CageClient,
+    mock_gateway_url: str,
+):
+    """Test top-level v3.0 envelope with envelope_id and external_attestations parses cleanly."""
+    envelope_data = create_mock_allow_envelope()
+    envelope_data["envelope_id"] = "env-uuid-999"
+    envelope_data["external_attestations"] = [{"provider": "provider_01"}]
+
+    respx.post(f"{mock_gateway_url}/governance/validate-action").mock(
+        return_value=httpx.Response(status_code=200, json=envelope_data)
+    )
+
+    envelope = await cage_client.validate_action(
+        action="execute_trade",
+        parameters={"symbol": "AAPL", "amount": 100},
+        agent_id="test-agent",
+    )
+    assert envelope.envelope_id == "env-uuid-999"
+    assert envelope.external_attestations == [{"provider": "provider_01"}]
+    assert envelope.payload["decision"] == "ALLOW"
+
+
+@respx.mock
+async def test_validate_action_http_200_require_approval_raises_deferral_pending(
+    cage_client: CageClient,
+    mock_gateway_url: str,
+):
+    """Test HTTP 200 envelope with verdict REQUIRE_APPROVAL raises DeferralPending."""
+    envelope_data = create_mock_allow_envelope()
+    envelope_data["payload"]["verdict"] = "REQUIRE_APPROVAL"
+    envelope_data["payload"]["defer_id"] = "hitl-ticket-123"
+    envelope_data["payload"]["defer_reason"] = "OPA_MANUAL_REVIEW"
+
+    respx.post(f"{mock_gateway_url}/governance/validate-action").mock(
+        return_value=httpx.Response(status_code=200, json=envelope_data)
+    )
+
+    with pytest.raises(DeferralPending) as exc_info:
+        await cage_client.validate_action(
+            action="execute_trade",
+            parameters={"symbol": "AAPL", "amount": 50000},
+            agent_id="test-agent",
+        )
+    assert exc_info.value.ticket_id == "hitl-ticket-123"
+    assert exc_info.value.defer_reason == "OPA_MANUAL_REVIEW"
+
+
+@respx.mock
+async def test_validate_action_http_200_deny_raises_policy_violation(
+    cage_client: CageClient,
+    mock_gateway_url: str,
+):
+    """Test HTTP 200 envelope with verdict DENY raises PolicyViolationException."""
+    envelope_data = create_mock_allow_envelope()
+    envelope_data["payload"]["verdict"] = "DENY"
+    envelope_data["payload"]["violations"] = ["CBF_DRAWDOWN_LIMIT"]
+
+    respx.post(f"{mock_gateway_url}/governance/validate-action").mock(
+        return_value=httpx.Response(status_code=200, json=envelope_data)
+    )
+
+    with pytest.raises(PolicyViolationException) as exc_info:
+        await cage_client.validate_action(
+            action="execute_trade",
+            parameters={"symbol": "AAPL", "amount": 50000},
+            agent_id="test-agent",
+        )
+    assert exc_info.value.reason_code == "POLICY_DENIED"
+    assert exc_info.value.violation_details["violations"] == ["CBF_DRAWDOWN_LIMIT"]
+
+
+@respx.mock
+async def test_validate_action_unknown_kid_fails_closed(
+    mock_gateway_url: str,
+    monkeypatch,
+):
+    """Test CageClient configured with public_keys rejects unknown kid."""
+    from src.gateway.client.exceptions import RoutingSealVerificationError
+
+    monkeypatch.setattr(
+        "src.gateway.client.transport.create_mtls_transport",
+        lambda *a, **kw: httpx.HTTPTransport(),
+    )
+    original_async_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        "httpx.AsyncClient",
+        lambda *a, **kw: original_async_client(*a, **{**kw, "http2": False}),
+    )
+
+    now = datetime.now(timezone.utc)
+    envelope_data = create_mock_allow_envelope()
+    envelope_data["issued_at"] = now.isoformat()
+    envelope_data["expires_at"] = (now + timedelta(minutes=5)).isoformat()
+
+    respx.post(f"{mock_gateway_url}/governance/validate-action").mock(
+        return_value=httpx.Response(status_code=200, json=envelope_data)
+    )
+
+    client = CageClient(
+        gateway_url=mock_gateway_url,
+        public_keys={"other-kid": "-----BEGIN PUBLIC KEY-----\n..."},
+    )
+    with pytest.raises(RoutingSealVerificationError, match="signed by unknown kid"):
+        await client.validate_action(
+            action="execute_trade",
+            parameters={"symbol": "AAPL", "amount": 100},
+            agent_id="test-agent",
+        )
+    await client.aclose()

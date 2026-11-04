@@ -1,0 +1,277 @@
+# CAGE Audit Log Schema Reference
+
+**Schemas:** `cage-intent/1.0` · `cage-view-access/1.0`  
+**Source of truth:** [`examples/telemetry.py`](../../examples/telemetry.py)  
+**Output format:** [NDJSON](https://ndjson.org/) — one JSON object per line, append-only  
+**Output paths:**
+- Evidence chain: `examples/evidence/evidence_chain_<YYYY-MM-DD>.ndjson`
+- View-access log: `examples/evidence/view_access_log_<YYYY-MM-DD>.ndjson`
+
+---
+> **v3.0.1 Update:** The schema now supports full `RefusalReceipt` v3 and `PauseReceipt` serialization into the evidence stream, preserving `tier_failures`, the 5-part proof chain, and byte-identical `proof_hash` calculation for non-repudiation.
+
+## Overview
+
+The CAGE audit log system produces two complementary NDJSON streams:
+
+1. **Evidence chain (`cage-intent/1.0`)** — tamper-evident record of every governance decision and human-in-the-loop approval. Each record SHA-256 hashes its own payload and chains the previous record's hash, forming an append-only, verifiable audit trail.
+
+2. **View-access log (`cage-view-access/1.0`)** — register of every read-access event against the evidence chain. Satisfies MiFID II Article 25 (recording of trade-related communications) and GDPR Article 30 (records of processing activities).
+
+### Hash Chain Mechanics
+
+> **Scope note.** This document describes the **playground telemetry** chains
+> produced by [`examples/telemetry.py`](../../examples/telemetry.py), which are
+> separate from the production audit chains in
+> [`src/gateway/governance/evidence/stream.py`](../../src/gateway/governance/evidence/stream.py)
+> (`cage-audit/3.0`) and
+> [`src/compliance_bridge/context_accumulator.py`](../../src/compliance_bridge/context_accumulator.py)
+> (`cage-context-accumulator/2.0`). Those production chains canonicalize with
+> RFC 8785 JCS; the `sort_keys=True` serialization described below applies only
+> to the playground chains and is **not** interchangeable with them. See
+> [`docs/BREAKING_CHANGES_v3.md`](../BREAKING_CHANGES_v3.md) for the production
+> canonicalization change.
+
+```
+record_hash = SHA-256( prev_hash || JSON(payload, sort_keys=True) )
+```
+
+- Genesis record: `prev_hash = SHA-256("GENESIS")`
+- View-access genesis: `prev_hash = SHA-256("VIEW-GENESIS")`
+- Payload is serialised with `sort_keys=True` and no extra whitespace to ensure deterministic hashing across platforms
+- `record_hash` and `prev_hash` are excluded from the payload before hashing, then appended to the final record
+
+Chain integrity can be verified programmatically:
+
+```python
+from examples.telemetry import PlaygroundTelemetry
+
+tel = PlaygroundTelemetry()
+valid, count = tel.verify_chain()
+# valid=True means no record has been tampered with or inserted out of order
+```
+
+---
+
+## Schema 1: `cage-intent/1.0`
+
+Emitted for every **governance evaluation** (automated) and **HITL approval** (human).
+
+### Governance Evaluation Record
+
+```json
+{
+  "schema":           "cage-intent/1.0",
+  "record_id":        "3f2a1b4c-...",
+  "timestamp":        "2026-05-23T13:00:00.000000+00:00",
+  "scenario_id":      "A",
+  "action":           "execute_trade",
+  "params_redacted":  { "ticker": "AAPL", "amount": 5000, "approval_token": "***REDACTED***" },
+  "decision":         "BLOCKED",
+  "blocking_tier":    3,
+  "violations":       ["UCA-4: trade amount exceeds consensus threshold"],
+  "elapsed_ms":       42.7,
+  "nist_controls":    ["SC-4", "SC-8", "SC-7"],
+  "iso_controls":     ["A.8.4", "A.6.2"],
+  "otel_service":     "cage-playground",
+  "prev_hash":        "a3f1b2c4...",
+  "record_hash":      "d9e8f7a6..."
+}
+```
+
+### HITL Approval Record
+
+```json
+{
+  "schema":           "cage-intent/1.0",
+  "record_id":        "8a9b0c1d-...",
+  "timestamp":        "2026-05-23T13:05:00.000000+00:00",
+  "event_type":       "hitl_approval",
+  "thread_id":        "lg-thread-xyz",
+  "decision":         "APPROVED",
+  "reviewer":         "analyst@example.com",
+  "rationale":        "Trade reviewed. Market conditions verified. Approved under Tier-2 authority.",
+  "comment":          "",
+  "nist_controls":    ["GOVERN-5", "SC-4"],
+  "iso_controls":     ["A.8.4", "A.7.2", "A.6.2"],
+  "iso_42001_clause": "6.1",
+  "otel_service":     "cage-financial-advisor",
+  "prev_hash":        "d9e8f7a6...",
+  "record_hash":      "f0e1d2c3..."
+}
+```
+
+### Field Reference
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `schema` | `string` | Always `"cage-intent/1.0"` |
+| `record_id` | `string (uuid4)` | Unique record identifier |
+| `timestamp` | `string (ISO 8601)` | UTC timestamp of record creation |
+| `event_type` | `string` | `"hitl_approval"` for HITL records; absent for governance evaluations |
+| `scenario_id` | `string` | Playground scenario ID (`"A"`–`"E"`); `"live"` for production gateway |
+| `action` | `string` | Tool or operation name (e.g., `"execute_trade"`) |
+| `params_redacted` | `object` | Action parameters with sensitive fields replaced by `"***REDACTED***"` |
+| `decision` | `string` | `"APPROVED"` or `"BLOCKED"` (governance) / `"APPROVED"` or `"REJECTED"` (HITL) |
+| `blocking_tier` | `integer` | Governance tier that blocked (0–6); `-1` if approved. See tier index below |
+| `violations` | `string[]` | List of UCA violation strings; empty array if approved |
+| `elapsed_ms` | `float` | Total governance pipeline latency in milliseconds |
+| `thread_id` | `string` | LangGraph thread ID (HITL records only) |
+| `reviewer` | `string` | Human reviewer identity — email or employee ID (HITL records only) |
+| `rationale` | `string` | Mandatory human justification text (HITL records only). Never redacted — the reviewer must not include PII. |
+| `comment` | `string` | Optional supplementary note (HITL records only) |
+| `nist_controls` | `string[]` | Applicable NIST SP 800-53 / NIST AI RMF control IDs |
+| `iso_controls` | `string[]` | Applicable ISO 42001 Annex A control IDs |
+| `iso_42001_clause` | `string` | Primary ISO 42001 main-body clause (HITL records only) |
+| `otel_service` | `string` | `OTEL_SERVICE_NAME` env var value at record creation time |
+| `prev_hash` | `string (sha256 hex)` | SHA-256 hash of the immediately preceding record |
+| `record_hash` | `string (sha256 hex)` | SHA-256 hash of this record (see chain mechanics above) |
+
+### Redacted Fields
+
+The following `params` keys are automatically replaced with `"***REDACTED***"` before persisting:
+
+```python
+{"ssn", "account", "approval_token", "payload", "password", "secret"}
+```
+
+This prevents PII from appearing in the audit log. The log records the *decision*, not the sensitive input data.
+
+### Outbound Credential Masking
+
+`params_redacted` covers *inbound* action parameters. A second, independent
+mechanism covers *outbound* credentials obtained from the credential broker seam
+([`credential_broker.py`](../../src/gateway/governance/seams/credential_broker.py))
+at the actuation edge.
+
+**Masking rule.** The actuator never logs any part of a fetched credential
+value — not even a prefix. Only the header *names* are logged, so operators can
+see *which* credential was issued without seeing its value. Implemented in
+[`adapter.py`](../../src/integrations/actuator_01/adapter.py), which logs
+`sorted(extra_headers)` (the header names) and nothing else from the broker
+response.
+
+The single INFO record emitted on a successful fetch carries only the action,
+the agent SVID (itself truncated to 20 characters plus `...` when longer), and
+the sorted header names:
+
+```text
+[actuator_01/adapter] Outbound auth headers fetched for action=execute_trade svid=urn:cage:agent:advis... header_names=['Authorization']
+```
+
+> [!NOTE]
+> An earlier revision logged each value's first 8 characters followed by
+> `****`. That leaked the first 8 characters of bare-token headers (headers
+> with no scheme prefix), so value prefixes are no longer logged.
+
+**Credentials never enter audit records.** The broker's return value is held in a
+local variable for the duration of a single dispatch and is passed only to
+[`ActuatorHttpClient.submit_envelope(extra_headers=...)`](../../src/integrations/actuator_01/client.py),
+which merges it into the outbound request headers and logs only operator counts,
+assertion length, body length, and the response status code. Specifically:
+
+| Surface | Contains credential values? | Evidence |
+|---|---|---|
+| Signed canonical envelope / `envelope_digest` | No — the envelope is built after the fetch and never receives `extra_headers` | [`adapter.py`](../../src/integrations/actuator_01/adapter.py) |
+| `ActuationReceipt` fields, including `raw_receipt` | No | `test_credential_headers_not_in_audit_record` |
+| `ActuationReceipt.findings` (including `CREDENTIAL_BROKER_FAILED`) | No | `test_credential_headers_not_in_audit_record` |
+| Adapter / client logs at INFO and above | Masked only | `test_actuator_masks_credentials_in_logs` |
+
+Both assertions are enforced by
+[`tests/test_execution_actuator_broker.py`](../../tests/test_execution_actuator_broker.py):
+the masking test fails if the full secret appears anywhere in captured log
+output, and the audit-record test fails if it appears in `str(receipt)`,
+`receipt.raw_receipt`, or any finding.
+
+### Governance Tier Index
+
+The governance pipeline is a **8-tier two-phase symbolic governor** (`proof/model.py` `TIER_LABELS`: Tiers `0.5` through `6`). Active backing verifiers are OPA, Control Barrier Functions (CBF), multi-agent consensus, and TLA+ formal models.
+
+| Tier | Phase | Gate | Control | Source |
+|------|-------|------|---------|--------|
+| 0.5 | Phase 1 (read-only) | FTRA reachability & structural path boundary gate | `CTRL_FTRA_001` | `src/gateway/governance/governor/stages/ftra.py` |
+| 1 | Phase 1 (read-only) | STPA Unsafe Control Action validation | UCA-* (from `config/stpa_control_structure.yaml`) | `src/gateway/governance/stpa_validator.py` |
+| 3b | Phase 1 (read-only) | OPA policy engine | `CTRL_OPA_005` | `src/gateway/core/policy.py` |
+| 2 | Phase 1 (read-only) | Agentic model confidence threshold (`AGENT_CONFIDENCE_THRESHOLD=0.95`) | `CTRL_AGT_001` | `src/gateway/governance/governor/stages/confidence.py` |
+| 5 | Phase 1 (read-only) | Multi-agent consensus (≥$10,000 USD) | ISO 42001 A.8.4 | `src/gateway/governance/consensus/engine.py` |
+| 6 | Phase 1 (read-only) | DoWhy causal gatekeeper (placebo refutation, p<0.05) | `CTRL_MRM_004`, `CTRL_TEL_003` | `src/gateway/governance/causal/gatekeeper.py` |
+| 3a | Phase 2 (mutating) | Control Barrier Function (CBF) | `CTRL_MRM_004` (`h(x)≥0`, γ=0.5) | `src/gateway/governance/safety/cbf_engine.py` |
+| 4 | Phase 2 (mutating) | Fiscal Limit Pre-Reservation (`FiscalLimitGuard`, daily cap $500k) | Redis atomic Lua reservation, confirmed after actuation | `src/cage_finance/safety/fiscal_limit_guard.py` |
+
+---
+
+## Schema 2: `cage-view-access/1.0`
+
+Emitted every time the evidence chain is read via `PlaygroundTelemetry.read_evidence_log()`.
+
+### View-Access Record
+
+```json
+{
+  "schema":           "cage-view-access/1.0",
+  "event_id":         "1a2b3c4d-...",
+  "timestamp":        "2026-05-23T14:00:00.000000+00:00",
+  "accessor_id":      "compliance-officer@example.com",
+  "reason":           "quarterly audit review",
+  "filter_scenario":  null,
+  "records_accessed": 47,
+  "read_fingerprint": "b2c3d4e5...",
+  "prev_view_hash":   "a1b2c3d4...",
+  "event_hash":       "c3d4e5f6..."
+}
+```
+
+### Field Reference
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `schema` | `string` | Always `"cage-view-access/1.0"` |
+| `event_id` | `string (uuid4)` | Unique event identifier |
+| `timestamp` | `string (ISO 8601)` | UTC timestamp of the read event |
+| `accessor_id` | `string` | Identity of the reader — email, service account, or user ID |
+| `reason` | `string` | Business justification for the access |
+| `filter_scenario` | `string \| null` | Scenario filter applied; `null` if all records were read |
+| `records_accessed` | `integer` | Number of evidence records returned to the accessor |
+| `read_fingerprint` | `string (sha256 hex)` | SHA-256 hash of all `record_hash` values in the returned set — proves which exact records were read |
+| `prev_view_hash` | `string (sha256 hex)` | Hash of the previous view-access event (genesis: `SHA-256("VIEW-GENESIS")`) |
+| `event_hash` | `string (sha256 hex)` | Hash of this view-access event |
+
+---
+
+## Regulatory Compliance Mapping
+
+> **Architecture Note:** ISO 42001 requirements are **universal** and apply to all `CAGE_DEPLOYMENT_REGION` values. All other frameworks are **jurisdictional** and apply only to the indicated region.
+
+| Regulatory Requirement | Jurisdiction | How the Audit Log Satisfies It |
+|------------------------|-------------|-------------------------------|
+| **ISO 42001 §6.1** — Risk treatment documentation | **Universal** (all regions) | HITL approval records persist the human's risk treatment decision and rationale before graph resumption |
+| **ISO 42001 A.7.2** — Accountability | **Universal** (all regions) | `reviewer` field attributes every HITL decision to a named individual |
+| **ISO 42001 A.8.4** — AI system operation controls | **Universal** (all regions) | Governance evaluation records provide continuous evidence of operational control enforcement |
+| **ISO 42001 A.9.2** — Evidence integrity | **Universal** (all regions) | SHA-256 hash chain ensures tamper-evident audit trail across all regions |
+| **MiFID II Art. 25** — Recording of trade-related communications | **EU_ECB only** | View-access log registers every read of trade governance decisions, with accessor identity and timestamp |
+| **GDPR Art. 30** — Records of processing activities | **EU_ECB only** | View-access log constitutes a record of who accessed personal-data-adjacent decision records and why |
+| **DORA Art. 10** — ICT risk management continuity | **EU_ECB only** | Hash chain tamper evidence ensures log integrity cannot be silently compromised |
+| **MAS Notice 655** — Audit logging requirements | **APAC_MAS only** | Append-only NDJSON evidence chain with 7-year retention satisfies MAS audit record requirements |
+| **NIST AI RMF GOVERN-5** — Human oversight | **US_FED only** | HITL approval records prove human review occurred before high-risk execution |
+| **FISMA AU-11** — Audit record retention | **US_FED only** | Evidence chain retained per US_FED baseline retention policy |
+
+---
+
+## OTel Span Attribute Alignment
+
+The following OTel span attributes are emitted alongside every evidence record, using the same naming convention as `src/gateway/governance/governor/governor.py` and `src/gateway/governance/stpa_validator.py`:
+
+| OTel Attribute | Value | Notes |
+|----------------|-------|-------|
+| `langfuse.observation.type` | `"span"` | |
+| `langfuse.observation.name` | `"governance_evaluation"` or `"hitl_approval"` | |
+| `langfuse.observation.input` | JSON of scenario + action + params | |
+| `langfuse.observation.output` | `"BLOCKED"` \| `"APPROVED"` | |
+| `langfuse.trace.metadata.iso.control_id` | `"A.8.4"` | |
+| `langfuse.trace.metadata.nist.control_id` | `"SC-4"` | |
+| `cage.governance.decision` | `"BLOCKED"` \| `"APPROVED"` | |
+| `cage.governance.blocking_tier` | `0.5`–`7` or `-1` | |
+| `cage.governance.violation_count` | `integer` | |
+| `cage.governance.elapsed_ms` | `float` | |
+| `cage.evidence.chain_hash` | SHA-256 hex | Links OTel span to the NDJSON evidence record |
+| `cage.evidence.record_id` | UUID4 | |

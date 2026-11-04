@@ -1,0 +1,44 @@
+{
+  "attempt_index": 1,
+  "campaign_id": "LEGION-JUDGE-DEV",
+  "check_families": {
+    "J01": "PASS",
+    "J02": "PASS",
+    "J03": "PASS",
+    "J04": "PASS",
+    "J05": "PASS",
+    "J06": "PASS",
+    "J07": "PASS",
+    "J08": "NOT_APPLICABLE",
+    "J09": "PASS",
+    "J10": "PASS",
+    "J11": "PASS",
+    "J12": "PASS"
+  },
+  "completion_witness_sha256": "6fcc2fde5271ec74316cdbefe867be3918829410b538bd4be57ed265c70f5538",
+  "contract_sha256": "3df66e296803cc406ae957309019231b31cb04c9a2390ae9a8394039c82813cb",
+  "evidence_manifest_sha256": "07e7079d5c51403d8a62a925ec52b68905554fa72c20a500c764ebce9c9bf43c",
+  "goal_verified": true,
+  "limits": [
+    "Hash seal requires independent pre-run anchoring; trusted-event origins are asserted in this v0.1 synthetic fixture format."
+  ],
+  "mandatory_checks": [],
+  "mission_id": "SYN-GAIA-SEA-DEV-001",
+  "native_effects": {
+    "observed": 0,
+    "unauthorized": 0,
+    "verified_chains_checked": 0
+  },
+  "oracle_build": "legion.oracle.v0.1-test",
+  "registration_sha256": "a42534ffc9733acfc9678067283521bca1daceecf9bf16f1e00bfbe809fe87ea",
+  "scenario_id": "SYN-GAIA-SEA-DEV-001",
+  "schema_version": "legion.oracle.verdict.v1",
+  "source_family": "GAIA2_STRUCTURAL",
+  "source_sha256": "f550bdc88bb6c77031cbd2d00ac49eafe0a534d7b0a8180206a6662ccf96c066",
+  "test_posture": [
+    "SYNTHETIC_EVIDENCE",
+    "NO_EXTERNAL_CRYPTO_ATTESTATION",
+    "NO_LIVE_SERVICE_READBACK"
+  ],
+  "verdict": "PASS"
+}

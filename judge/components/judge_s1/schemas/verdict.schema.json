@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:legion100:judge:schema:verdict.schema.json",
+  "title": "verdict.schema.json",
+  "description": "Legion v0.1 synthetic evaluator schema, not a live attestation",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "enum": [
+        "legion.oracle.verdict.v1"
+      ]
+    },
+    "oracle_build": {
+      "type": "string"
+    },
+    "mission_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "scenario_id": {
+      "type": "string"
+    },
+    "campaign_id": {
+      "type": "string"
+    },
+    "attempt_index": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "PASS",
+        "FAIL",
+        "SAFE_STOP",
+        "INDETERMINATE",
+        "INVALID_TEST"
+      ]
+    },
+    "mandatory_checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "check_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "PASS",
+              "FAIL",
+              "INDETERMINATE",
+              "SAFE_STOP",
+              "INVALID_TEST"
+            ]
+          },
+          "reason_code": {
+            "type": "string"
+          },
+          "evidence_refs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "check_id",
+          "status",
+          "reason_code",
+          "evidence_refs"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "completion_witness_sha256": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "check_families": {
+      "type": "object"
+    },
+    "test_posture": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "oracle_build",
+    "verdict",
+    "mandatory_checks",
+    "completion_witness_sha256"
+  ],
+  "additionalProperties": true
+}

@@ -1,0 +1,283 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import json
+import logging
+import os
+from typing import Any
+
+import httpx
+from opentelemetry import trace
+
+from src.gateway.infrastructure.mcp_client import get_mcp_client
+from src.gateway.observability.attributes import OBSERVATION_TYPE
+
+logger = logging.getLogger("EvaluatorAgent")
+tracer = trace.get_tracer("src.governed_financial_advisor.agents.evaluator")
+
+# ---------------------------------------------------------------------------
+# OPA direct HTTP helper — used by verify_policy_opa to avoid MCP round-trip.
+# The OPA REST API endpoint is taken from the OPA_URL env var (same source as
+# the gateway's OPAClient) and defaults to the standard OPA data API path.
+# ---------------------------------------------------------------------------
+_OPA_DEFAULT_URL = "http://localhost:8181/v1/data/trade/policy/decision"
+
+
+async def _call_opa_direct(input_data: dict) -> str:
+    """
+    Post *input_data* to OPA's REST API and return the decision string.
+
+    Returns one of ``"ALLOW"``, ``"DENY"``, ``"MANUAL_REVIEW"``, or a raw
+    string value from the OPA result.  Falls back to ``"DENY"`` on any
+    network or parse error so the caller can treat unknown responses safely.
+    """
+    opa_url = os.getenv("OPA_URL", _OPA_DEFAULT_URL)
+    auth_token = os.getenv("OPA_AUTH_TOKEN")
+    headers = {}
+    if auth_token:
+        headers["Authorization"] = f"Bearer {auth_token}"
+
+    with tracer.start_as_current_span("opa.evaluate_policy") as span:
+        span.set_attribute(OBSERVATION_TYPE, "span")
+        span.set_attribute("opa.url", opa_url)
+        span.set_attribute("opa.action", input_data.get("action", "unknown"))
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                response = await client.post(
+                    opa_url,
+                    json={"input": input_data},
+                    headers=headers,
+                )
+                response.raise_for_status()
+                decision = response.json().get("result", "DENY")
+                span.set_attribute("opa.decision", str(decision))
+                return decision
+        except Exception as exc:
+            span.record_exception(exc)
+            span.set_status(trace.Status(trace.StatusCode.ERROR, str(exc)))
+            logger.error("OPA direct HTTP call failed: %s", exc)
+            return "DENY"
+
+
+# --- TOOLS (Real Implementations via Gateway) ---
+
+
+async def check_market_status(symbol: str) -> str:
+    """
+    Checks real market status via Gateway (MCP).
+    """
+    try:
+        return await get_mcp_client().call_tool(
+            "check_market_status", {"symbol": symbol}
+        )
+    except Exception as e:
+        logger.error(f"Market Check Failed: {e}")
+        return f"ERROR: Could not fetch market status: {e}"
+
+
+async def verify_policy_opa(action: str, params: str) -> str:
+    """
+    Checks Regulatory Policy (OPA) via a direct HTTP call to OPA's REST API.
+
+    Previously this routed through the Gateway MCP tool ``evaluate_policy``.
+    It now calls OPA directly so that policy evaluation has no MCP dependency.
+    The OPA endpoint is resolved from the ``OPA_URL`` env var (default:
+    ``http://localhost:8181/v1/data/trade/policy/decision``).
+    """
+    try:
+        # Parse params
+        params_dict: dict = {}
+        if isinstance(params, str):
+            try:
+                cleaned_params = params.replace("'", '"')
+                params_dict = json.loads(cleaned_params)
+            except json.JSONDecodeError as e:
+                logger.warning(
+                    "Failed to parse tool arguments as JSON: %s. params=%r", e, params
+                )
+                params_dict = {"description": params}
+        elif isinstance(params, dict):
+            params_dict = params
+
+        # Ensure the action field is always present in the OPA input
+        params_dict["action"] = action
+
+        decision = await _call_opa_direct(params_dict)
+
+        if decision == "ALLOW":
+            return "APPROVED: Action matches policy."
+        elif decision == "DENY":
+            return "DENIED: Policy Violation."
+        elif decision == "MANUAL_REVIEW":
+            return "MANUAL_REVIEW: Requires human approval."
+        else:
+            return f"UNKNOWN: {decision}"
+    except Exception as e:
+        logger.error(f"OPA Check Failed: {e}")
+        return f"DENIED: System Error: {e}"
+
+
+async def simulate_governance_check(
+    target_tool: str, target_params: dict[str, Any], risk_profile: str = "Medium"
+) -> dict[str, Any]:
+    """
+    Calls the Gateway's SymbolicGovernor to perform a dry-run simulation check.
+
+    This is a SIMULATION ONLY — it calls ``simulate_governance_check`` on the
+    Gateway MCP server, which invokes ``symbolic_governor.verify()`` in sim_mode.
+    It does NOT enforce governance or block execution.  Mandatory enforcement
+    is handled in infrastructure by the ``safety_check`` LangGraph node.
+
+    Returns structured dict with ``verdict`` (a ``GovernanceDecision`` value,
+    or ``"ERROR"``), violations, and OPA results.
+
+    BUG-MCP-DICT-001 fix: GatewayMCPClient.call_tool() always returns a plain
+    ``str`` — it joins every MCP content block's ``.text`` field with "\\n"
+    regardless of the underlying tool's declared return type (see
+    ``mcp_client.py::call_tool``). The Gateway's ``simulate_governance_check``
+    MCP tool (mcp_tool_server.py) returns a ``dict[str, Any]``, which the MCP
+    transport serialises to a JSON string content block; the client then
+    handed that raw JSON string straight back to ``evaluator_node.py``, which
+    called ``.get("status")`` on it and crashed with
+    ``AttributeError: 'str' object has no attribute 'get'`` — a real
+    production defect surfaced only once the KMS/Redis/schema fixes earlier
+    in this session let a request finally reach this code path. Parsing the
+    string back into a dict here (at the single call site expecting
+    structured data) fixes this without having to change the generic
+    ``call_tool()`` contract that every other (string-returning) MCP tool
+    call in this codebase relies on.
+    """
+    try:
+        raw = await get_mcp_client().call_tool(
+            "simulate_governance_check",
+            {
+                "target_tool": target_tool,
+                "target_params": target_params,
+                "risk_profile": risk_profile,
+            },
+        )
+        if isinstance(raw, dict):
+            return raw
+        if isinstance(raw, str):
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                pass
+            logger.warning(
+                "simulate_governance_check: MCP tool returned a non-JSON-dict "
+                "string; treating as an error. raw=%r",
+                raw[:500],
+            )
+        return {
+            "verdict": "ERROR",
+            "message": f"Unexpected MCP response type/shape: {raw!r:.200}",
+            "violations": ["System Error"],
+        }
+    except Exception as e:
+        logger.error(f"Safety Simulation Failed: {e}")
+        return {"verdict": "ERROR", "message": str(e), "violations": ["System Error"]}
+
+
+# --- NEW: SAFETY INTERVENTION TOOL (Module 5) ---
+async def safety_intervention(reason: str) -> str:
+    """
+    EMERGENCY STOP: Signals the Gateway to interrupt any pending execution.
+    Sets the 'safety_violation' flag in shared state.
+    """
+    logger.warning(f"🛑 Evaluator Triggering Intervention: {reason}")
+    try:
+        # Call the intervention tool on Gateway (which sets Redis key)
+        return await get_mcp_client().call_tool(
+            "trigger_safety_intervention", {"reason": reason}
+        )
+    except Exception as e:
+        logger.critical(f"FATAL: Could not trigger intervention: {e}")
+        return f"ERROR: Intervention Failed: {e}"
+
+
+# --- AGENT DEFINITION ---
+
+from langchain_core.messages import SystemMessage
+from langchain_openai import ChatOpenAI
+from langgraph.prebuilt import create_react_agent
+
+_SYSTEM_PROMPT = """You are a policy evaluator agent for the Cybernetic Governance Engine.
+Your role is to evaluate whether AI agent actions comply with governance policies,
+risk thresholds, and regulatory requirements. Use the provided tools to assess compliance."""
+
+
+def build_evaluator_agent() -> Any:
+    """Build and return the evaluator agent as a compiled LangGraph.
+
+    Returns:
+        A compiled LangGraph (CompiledStateGraph) ready to be invoked with messages.
+
+    Note:
+        In LangChain v1.x / LangGraph 1.1.0+, create_react_agent returns a compiled
+        graph optimized for LangGraph state management, not an AgentExecutor.
+    """
+    api_base = os.environ.get("VLLM_FAST_API_BASE")
+    api_key = os.environ.get("OPENAI_API_KEY")
+    model = os.environ.get("MODEL_FAST")
+
+    if not api_base:
+        raise RuntimeError("VLLM_FAST_API_BASE must be set for the evaluator agent")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY must be set for the evaluator agent")
+
+    llm = ChatOpenAI(
+        base_url=api_base,
+        api_key=api_key,  # type: ignore[arg-type]  # ChatOpenAI expects SecretStr but str is accepted at runtime
+        model=model,  # type: ignore[arg-type]
+        temperature=0,
+    )
+
+    # verify_semantic_nemo removed — NeMo is now enforced as a mandatory graph node (ADR 2026-03-09)
+    tools = [
+        check_market_status,
+        verify_policy_opa,
+        simulate_governance_check,
+        safety_intervention,
+    ]
+
+    # LangGraph 1.1.0+ prebuilt agent — returns a compiled graph
+    # state_modifier replaces the old ChatPromptTemplate pattern
+    agent_graph = create_react_agent(
+        model=llm,
+        tools=tools,  # type: ignore[arg-type]
+        state_modifier=SystemMessage(content=_SYSTEM_PROMPT),  # type: ignore[arg-type]
+    )
+
+    return agent_graph
+
+
+# Lazy singleton — built on first access to avoid RuntimeError at import time
+# when VLLM_FAST_API_BASE / OPENAI_API_KEY are not set (e.g. unit-test collection).
+# In v1.x this is a compiled LangGraph (CompiledStateGraph), not an AgentExecutor.
+_evaluator_agent: Any = None
+
+
+def get_evaluator_agent() -> Any:
+    """Get or create the evaluator agent LangGraph.
+
+    Returns:
+        A compiled LangGraph (CompiledStateGraph) that can be invoked with:
+        await agent.ainvoke({"messages": [("user", "query")]})
+    """
+    global _evaluator_agent
+    if _evaluator_agent is None:
+        _evaluator_agent = build_evaluator_agent()
+    return _evaluator_agent

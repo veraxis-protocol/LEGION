@@ -1,0 +1,70 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# lula-validation-ia5.yaml
+# NIST SP 800-53 Rev 5 — IA-5: Authenticator Management (Secret Rotation)
+#
+# Asserts that:
+#   1. All Secrets in the governance-stack namespace carry the cage.io/rotation-schedule annotation
+#   2. (removed 2026-09-27, POAM-2026-080: the cage-routing-seal HMAC ingress
+#      secret no longer exists; gateway callers authenticate by mesh identity)
+#   3. No Pod env var directly sets a value for keys matching SECRET/KEY/PASSWORD/TOKEN
+#      (all sensitive env vars must reference Secrets via secretKeyRef)
+#   4. All Secrets carry the cage.io/sensitivity-level label
+#
+# Domain: kubernetes → Secrets, Pods in governance-stack namespace
+# Provider: opa (inline Rego)
+#
+# References:
+#   - deployment/k8s/backend-deployment.yaml — secret volume mounts pattern
+#   - deployment/terraform/secrets.tf — GCP Secret Manager bindings
+#   - docs/POAM.md — POAM-2026-080 (cage-routing-seal HMAC ingress secret retired)
+#
+# OSCAL Mapping:
+#   component: cage-gateway
+#   control: ia-5
+#
+# Namespace: governance-stack (confirmed from live cluster deployment snapshot)
+
+component-definition:
+  uuid: a38b0a6b-24e5-5518-a675-3481818970a0
+  metadata:
+    title: CAGE Validation — IA5
+    last-modified: '2026-07-01T13:18:54Z'
+    version: 1.0.0
+    oscal-version: 1.1.2
+    remarks: "Auto-converted from standalone lula validation format.\nRegion: US_FED. Posture: nist-sp800-53.\nNotes: NIST SP 800-53 Rev 5 IA-5: Authenticator Management — Secret Rotation. Namespace: governance-stack (confirmed from live cluster deployment snapshot). Implements four authenticator management assertions for the CAGE governance namespace:\n  (1) All user-managed Secrets must carry cage.io/rotation-schedule annotation\n      (enforces documented rotation periods per IA-5(1) authenticator lifecycle).\n  (2) removed 2026-09-27 (POAM-2026-080): the cage-routing-seal HMAC ingress secret no longer exists.\n  (3) No Pod container may embed sensitive values directly in env var value: fields —\n      all keys matching *SECRET*, *KEY*, *PASSWORD*, *TOKEN* must reference\n      Kubernetes Secrets via secretKeyRef (prevents credential exposure in pod specs).\n  (4) All Secrets must carry cage.io/sensitivity-level label (enforces sensitivity\n      classification per IA-5 authenticator management policy).\nkubernetes.io/service-account-token type Secrets are excluded from annotation checks as they are lifecycle-managed by Kubernetes automatically. See: compliance/continuous-monitoring/ISCM_STRATEGY.md — IA-5 monitoring cadence."
+  components:
+  - uuid: 879f45e9-a98a-5f27-ba00-651322ad7d3c
+    type: software
+    title: CAGE Cybernetic Governance Engine
+    description: The Cybernetic AI Governance Engine (CAGE) — AI governance gateway, compliance bridge, and governed financial advisor.
+    control-implementations:
+    - uuid: 8ca3b5e5-0d39-5d8f-a452-020ca7259254
+      source: https://csrc.nist.gov/publications/detail/sp/800-53/rev-5/final
+      description: 'Control implementation for IA5. Region: US_FED. Posture: nist-sp800-53.'
+      implemented-requirements:
+      - uuid: cce1fd52-f0f5-5788-9a91-ca652f102324
+        control-id: ia5
+        description: Automated lula validation for IA5.
+        links:
+        - href: '#b322b5e6-d8bd-51ab-bbf0-246a45d87b8f'
+          rel: lula
+  back-matter:
+    resources:
+    - uuid: b322b5e6-d8bd-51ab-bbf0-246a45d87b8f
+      title: Lula Validation — IA5
+      rlinks:
+      - href: lula.dev
+      description: "domain:\n  type: kubernetes\n  kubernetes-spec:\n    resources:\n    - name: cage-secrets\n      resource: secrets\n      namespace: governance-stack\n    - name: cage-pods\n      resource: pods\n      namespace: governance-stack\nprovider:\n  type: opa\n  opa-spec:\n    rego: \"package lula\\n\\nimport future.keywords.if\\nimport future.keywords.every\\n\\n# IA-5: Authenticator Management — Secret Rotation and Secure Reference\\n#\\n# Check 1: All Secrets must have the cage.io/rotation-schedule annotation.\\n# Check 3: No Pod env var directly embeds a sensitive value (must use secretKeyRef).\\n# Check 4: All Secrets must carry cage.io/sensitivity-level label.\\n\\n# Sensitive env var key patterns (case-insensitive match via contains)\\nis_sensitive_key(key) if { contains(upper(key), \\\"SECRET\\\") }\\nis_sensitive_key(key) if { contains(upper(key), \\\"PASSWORD\\\") }\\nis_sensitive_key(key) if { contains(upper(key), \\\"TOKEN\\\") }\\nis_sensitive_key(key) if { contains(upper(key), \\\"_KEY\\\") }\\n\\n# Check 1 + 4: All Secrets have rotation-schedule annotation and sensitivity label.\\n# ServiceAccount token secrets (type=kubernetes.io/service-account-token) are excluded\\n# as they are managed by Kubernetes automatically.\\nsecrets_compliant if {\\n  user_secrets := [s | s := input[\\\"cage-secrets\\\"][_]; s.type != \\\"kubernetes.io/service-account-token\\\"]\\n  every secret in user_secrets {\\n    secret.metadata.annotations[\\\"cage.io/rotation-schedule\\\"] != null\\n    secret.metadata.labels[\\\"cage.io/sensitivity-level\\\"] != null\\n  }\\n}\\n\\n# Check 3: No container env var hardcodes a sensitive value directly.\\n# All sensitive values must come from secretKeyRef (not a plain value: field).\\nno_hardcoded_secrets if {\\n  every pod in input[\\\"cage-pods\\\"] {\\n    every container in pod.spec.containers {\\n      every env in container.env {\\n        not (is_sensitive_key(env.name) ; env.value != null ; env.value != \\\"\\\")\\n      }\\n    }\\n  }\\n}\\n\\nvalidate if {\\n  secrets_compliant\\n  no_hardcoded_secrets\\n}\\n\"\n"

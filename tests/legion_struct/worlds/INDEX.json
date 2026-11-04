@@ -1,0 +1,187 @@
+[
+ {
+  "family": "SYN-GAIA-EXE",
+  "mission_id": "LEGION-STRUCT-GAIA-EXE-001",
+  "active_roles": 7,
+  "public_tasks": 7,
+  "obligations": 7,
+  "kinds": [
+   "COMMUNICATE",
+   "READ",
+   "WRITE"
+  ],
+  "events": []
+ },
+ {
+  "family": "SYN-GAIA-SEA",
+  "mission_id": "LEGION-STRUCT-GAIA-SEA-001",
+  "active_roles": 4,
+  "public_tasks": 8,
+  "obligations": 7,
+  "kinds": [
+   "ANALYZE",
+   "COMMUNICATE",
+   "READ"
+  ],
+  "events": []
+ },
+ {
+  "family": "SYN-GAIA-ADA",
+  "mission_id": "LEGION-STRUCT-GAIA-ADA-001",
+  "active_roles": 3,
+  "public_tasks": 6,
+  "obligations": 6,
+  "kinds": [
+   "COMMUNICATE",
+   "READ",
+   "WAIT",
+   "WRITE"
+  ],
+  "events": [
+   "ev-ada-degrade"
+  ]
+ },
+ {
+  "family": "SYN-GAIA-TIM",
+  "mission_id": "LEGION-STRUCT-GAIA-TIM-001",
+  "active_roles": 3,
+  "public_tasks": 4,
+  "obligations": 4,
+  "kinds": [
+   "COMMUNICATE",
+   "READ",
+   "WAIT",
+   "WRITE"
+  ],
+  "events": [
+   "ev-tim-open",
+   "ev-tim-close"
+  ]
+ },
+ {
+  "family": "SYN-GAIA-AMB",
+  "mission_id": "LEGION-STRUCT-GAIA-AMB-001",
+  "active_roles": 3,
+  "public_tasks": 4,
+  "obligations": 4,
+  "kinds": [
+   "COMMUNICATE",
+   "READ",
+   "REFUSE"
+  ],
+  "events": []
+ },
+ {
+  "family": "SYN-GAIA-A2A",
+  "mission_id": "LEGION-STRUCT-GAIA-A2A-001",
+  "active_roles": 3,
+  "public_tasks": 5,
+  "obligations": 5,
+  "kinds": [
+   "COMMUNICATE",
+   "READ",
+   "WRITE"
+  ],
+  "events": []
+ },
+ {
+  "family": "SYN-GAIA-NOI",
+  "mission_id": "LEGION-STRUCT-GAIA-NOI-001",
+  "active_roles": 2,
+  "public_tasks": 4,
+  "obligations": 4,
+  "kinds": [
+   "READ",
+   "RECONCILE",
+   "WRITE"
+  ],
+  "events": []
+ },
+ {
+  "family": "SYN-OTEL-01",
+  "mission_id": "LEGION-STRUCT-OTEL-01-001",
+  "active_roles": 4,
+  "public_tasks": 6,
+  "obligations": 5,
+  "kinds": [
+   "ANALYZE",
+   "COMMUNICATE",
+   "READ",
+   "WRITE"
+  ],
+  "events": []
+ },
+ {
+  "family": "SYN-OTEL-02",
+  "mission_id": "LEGION-STRUCT-OTEL-02-001",
+  "active_roles": 3,
+  "public_tasks": 6,
+  "obligations": 5,
+  "kinds": [
+   "ANALYZE",
+   "READ",
+   "WRITE"
+  ],
+  "events": []
+ },
+ {
+  "family": "SYN-OTEL-03",
+  "mission_id": "LEGION-STRUCT-OTEL-03-001",
+  "active_roles": 3,
+  "public_tasks": 6,
+  "obligations": 5,
+  "kinds": [
+   "ANALYZE",
+   "READ",
+   "WRITE"
+  ],
+  "events": []
+ },
+ {
+  "family": "SYN-OTEL-04",
+  "mission_id": "LEGION-STRUCT-OTEL-04-001",
+  "active_roles": 12,
+  "public_tasks": 34,
+  "obligations": 34,
+  "kinds": [
+   "ANALYZE",
+   "COMMUNICATE",
+   "READ",
+   "WRITE"
+  ],
+  "events": []
+ },
+ {
+  "family": "SYN-OTEL-05",
+  "mission_id": "LEGION-STRUCT-OTEL-05-001",
+  "active_roles": 3,
+  "public_tasks": 6,
+  "obligations": 5,
+  "kinds": [
+   "ANALYZE",
+   "READ",
+   "WAIT",
+   "WRITE"
+  ],
+  "events": [
+   "ev-o5-w1",
+   "ev-o5-w2"
+  ]
+ },
+ {
+  "family": "SYN-OTEL-06",
+  "mission_id": "LEGION-STRUCT-OTEL-06-001",
+  "active_roles": 3,
+  "public_tasks": 6,
+  "obligations": 5,
+  "kinds": [
+   "ANALYZE",
+   "READ",
+   "WAIT",
+   "WRITE"
+  ],
+  "events": [
+   "ev-o6-contained"
+  ]
+ }
+]

@@ -1,0 +1,13 @@
+# Trivy ignore file for the SBOM/CVE gate (.github/workflows/sbom.yml) and
+# deployment/docker/cloudbuild.verify.yaml.
+#
+# Intentionally empty. Every entry was pruned on 2026-10-05 after the advisor,
+# gateway and compliance-bridge images moved to the digest-pinned Wolfi base:
+# Cloud Build verification (cloudbuild.verify.yaml with --show-suppressed)
+# showed 0 HIGH/CRITICAL findings and 0 suppressed matches in all three images
+# (POAM-2026-101).
+#
+# Policy: do not add an entry to make the gate pass. A suppression needs an
+# open POAM item, a justification, and a review date in the comment above it,
+# and must be added in its own PR. Prefer fixing the image (base bump, dropping
+# the package) over suppressing.

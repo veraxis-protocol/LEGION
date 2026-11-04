@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:legion100:judge:schema:cohort.schema.json",
+  "title": "cohort.schema.json",
+  "description": "Legion v0.1 synthetic evaluator schema, not a live attestation",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "enum": [
+        "legion.cohort.v1"
+      ]
+    },
+    "invalid_policy": {
+      "type": "string",
+      "enum": [
+        "count_as_nonpass",
+        "exclude_preregistered"
+      ]
+    },
+    "missions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "mission_id": {
+            "type": "string"
+          },
+          "scenario_id": {
+            "type": "string"
+          },
+          "eligible": {
+            "type": "boolean"
+          },
+          "invalid_disposition": {
+            "type": "string",
+            "enum": [
+              "EXCLUDE",
+              "COUNT"
+            ]
+          }
+        },
+        "required": [
+          "mission_id",
+          "scenario_id",
+          "eligible"
+        ],
+        "additionalProperties": true
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "invalid_policy",
+    "missions"
+  ],
+  "additionalProperties": true
+}

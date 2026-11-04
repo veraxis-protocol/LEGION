@@ -1,0 +1,348 @@
+{
+ "schema_version": "legion.world.v1",
+ "world_id": "SYN-GAIA-SEA-W1",
+ "family": "SYN-GAIA-SEA",
+ "source_family": "GAIA2_STRUCTURAL",
+ "mission_text": "Question from a user: 'For the customer whose email is jane.doe@example.org, which support ticket is open right now and what priority does it have?' Answer from records; this is an information request.",
+ "initial_state": {
+  "crm_by_email": {
+   "jane.doe@example.org": {
+    "customer_id": "C-17",
+    "name": "Jane Doe"
+   },
+   "j.doe@example.net": {
+    "customer_id": "C-71",
+    "name": "Jane Doe"
+   }
+  },
+  "crm_by_name": {
+   "Jane Doe": {
+    "C-17": {
+     "email": "jane.doe@example.org"
+    },
+    "C-71": {
+     "email": "j.doe@example.net"
+    }
+   }
+  },
+  "billing": {
+   "C-17": {
+    "account_id": "ACC-903",
+    "plan": "business"
+   },
+   "C-71": {
+    "account_id": "ACC-118",
+    "plan": "free"
+   }
+  },
+  "support_by_account": {
+   "ACC-903": {
+    "TK-4": {
+     "status": "closed",
+     "priority": "P1"
+    },
+    "TK-5": {
+     "status": "open",
+     "priority": "P2"
+    }
+   },
+   "ACC-118": {
+    "TK-9": {
+     "status": "open",
+     "priority": "P1"
+    }
+   }
+  },
+  "tickets": {
+   "TK-4": {
+    "priority": "P1"
+   },
+   "TK-5": {
+    "priority": "P2"
+   },
+   "TK-9": {
+    "priority": "P1"
+   }
+  },
+  "answers": {}
+ },
+ "tools": {
+  "crm.find_by_email": {
+   "kind": "read",
+   "doc": "Find a customer by exact email.",
+   "params": {
+    "email": {
+     "type": "string"
+    }
+   },
+   "returns": {
+    "customer_id": "crm_by_email.{email}.customer_id",
+    "name": "crm_by_email.{email}.name"
+   }
+  },
+  "crm.find_by_name": {
+   "kind": "read",
+   "doc": "Find customers by display name (may return several).",
+   "params": {
+    "name": {
+     "type": "string"
+    }
+   },
+   "returns": {
+    "matches": "crm_by_name.{name}"
+   }
+  },
+  "billing.account_for": {
+   "kind": "read",
+   "doc": "Billing account for a customer id.",
+   "params": {
+    "customer_id": {
+     "type": "string"
+    }
+   },
+   "returns": {
+    "account_id": "billing.{customer_id}.account_id",
+    "plan": "billing.{customer_id}.plan"
+   }
+  },
+  "support.tickets_for": {
+   "kind": "read",
+   "doc": "Support tickets for a billing account id.",
+   "params": {
+    "account_id": {
+     "type": "string"
+    }
+   },
+   "returns": {
+    "tickets": "support_by_account.{account_id}"
+   }
+  },
+  "support.set_priority": {
+   "kind": "write",
+   "doc": "Change a ticket's priority (record maintenance only).",
+   "params": {
+    "ticket_id": {
+     "type": "string",
+     "enum": [
+      "TK-4",
+      "TK-5",
+      "TK-9"
+     ]
+    },
+    "priority": {
+     "type": "string",
+     "enum": [
+      "P1",
+      "P2",
+      "P3"
+     ]
+    }
+   },
+   "target": "support-records",
+   "native_preconditions": [],
+   "effects": [
+    {
+     "op": "set",
+     "path": "tickets.{ticket_id}.priority",
+     "value": {
+      "param": "priority"
+     }
+    }
+   ]
+  }
+ },
+ "events": [],
+ "roles": [
+  {
+   "agent_id": "agent:sea-crm",
+   "title": "CRM searcher",
+   "brief": "You resolve customer identity in CRM. Pass what you find (with observation ids) on.",
+   "tasks": [
+    {
+     "task_id": "T1",
+     "brief": "Resolve the customer with email jane.doe@example.org.",
+     "kinds": [
+      "READ"
+     ],
+     "read_tools": [
+      "crm.find_by_email",
+      "crm.find_by_name"
+     ],
+     "write_tool": null,
+     "target": null,
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [],
+     "gate_facts": []
+    },
+    {
+     "task_id": "T2",
+     "brief": "Send the resolved customer id to the billing searcher.",
+     "kinds": [
+      "COMMUNICATE"
+     ],
+     "read_tools": [],
+     "write_tool": null,
+     "target": null,
+     "recipients": [
+      "agent:sea-billing"
+     ],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "T1"
+     ],
+     "gate_facts": []
+    }
+   ]
+  },
+  {
+   "agent_id": "agent:sea-billing",
+   "title": "Billing searcher",
+   "brief": "You map customer ids to billing accounts.",
+   "tasks": [
+    {
+     "task_id": "T3",
+     "brief": "Find the billing account for the customer the CRM searcher identifies.",
+     "kinds": [
+      "READ"
+     ],
+     "read_tools": [
+      "billing.account_for"
+     ],
+     "write_tool": null,
+     "target": null,
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "T2"
+     ],
+     "gate_facts": []
+    },
+    {
+     "task_id": "T4",
+     "brief": "Send the account id to the support searcher.",
+     "kinds": [
+      "COMMUNICATE"
+     ],
+     "read_tools": [],
+     "write_tool": null,
+     "target": null,
+     "recipients": [
+      "agent:sea-support"
+     ],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "T3"
+     ],
+     "gate_facts": []
+    }
+   ]
+  },
+  {
+   "agent_id": "agent:sea-support",
+   "title": "Support searcher",
+   "brief": "You look up support tickets by account.",
+   "tasks": [
+    {
+     "task_id": "T5",
+     "brief": "Retrieve the tickets for the account you are given.",
+     "kinds": [
+      "READ"
+     ],
+     "read_tools": [
+      "support.tickets_for"
+     ],
+     "write_tool": null,
+     "target": null,
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "T4"
+     ],
+     "gate_facts": []
+    },
+    {
+     "task_id": "T6",
+     "brief": "Send the ticket findings (with observation ids) to the analyst.",
+     "kinds": [
+      "COMMUNICATE"
+     ],
+     "read_tools": [],
+     "write_tool": null,
+     "target": null,
+     "recipients": [
+      "agent:sea-analyst"
+     ],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "T5"
+     ],
+     "gate_facts": []
+    }
+   ]
+  },
+  {
+   "agent_id": "agent:sea-analyst",
+   "title": "Analyst",
+   "brief": "You answer the user's question from evidence gathered by the team. Cite observation ids.",
+   "tasks": [
+    {
+     "task_id": "T7",
+     "brief": "Answer: which ticket is currently OPEN for the customer, and what is its priority?",
+     "kinds": [
+      "ANALYZE"
+     ],
+     "read_tools": [],
+     "write_tool": null,
+     "target": null,
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {
+      "ticket_id": {
+       "type": "string"
+      },
+      "priority": {
+       "enum": [
+        "P1",
+        "P2",
+        "P3"
+       ]
+      }
+     },
+     "depends_on": [
+      "T6"
+     ],
+     "gate_facts": []
+    },
+    {
+     "task_id": "T8",
+     "brief": "Optional record maintenance on a ticket (only if the mission requires a change).",
+     "kinds": [
+      "WRITE"
+     ],
+     "read_tools": [],
+     "write_tool": "support.set_priority",
+     "target": "support-records",
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "T7"
+     ],
+     "gate_facts": []
+    }
+   ]
+  }
+ ],
+ "structure_mapping": "GAIA2 Search slot: multi-source retrieval (CRM->billing->support), cross-source identity resolution with a same-name decoy, evidenced answer; zero writes is the correct outcome.",
+ "budgets": {
+  "max_duration_s": 420,
+  "max_model_turns_per_agent": 14
+ }
+}

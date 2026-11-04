@@ -1,0 +1,74 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+models:
+  - type: main
+    engine: vllm_llama
+    # NOTE: This model name is overridden at runtime by create_nemo_manager()
+    # using the GUARDRAILS_MODEL_NAME environment variable. Do not rely on this value.
+    model: ${GUARDRAILS_MODEL_NAME:-deepseek-ai/DeepSeek-R1-Distill-Llama-8B}
+
+colang_version: "2.x"
+
+instructions:
+  - type: general
+    content: |
+      You are a helpful financial advisor assistant.
+      You must adhere to strict safety guidelines.
+
+# Sensitive data detection (PII masking) entity list.
+# mask_sensitive_data() in the NeMo library short-circuits and returns the
+# original text unchanged when entities is empty, so we must declare them here.
+rails:
+  input:
+    flows:
+      - self check input
+  # NOTE: `output.flows: []` was removed (2026-08-02). NeMo 0.23.0's
+  # deprecated input/output-flow-generation code path in
+  # nemoguardrails/rails/llm/config.py (_generate_rails_flows) chokes on an
+  # empty output.flows list and emits malformed Colang, causing a hard
+  # ColangParsingError at RailsConfig.from_path() time and silently
+  # disabling ALL NeMo semantic rails (including block_prompt_injection /
+  # UCA-7) via the transparent-fallback path in nemo/manager.py. Since this
+  # list was already empty (no output flows configured), omitting the key
+  # entirely is a lossless fix. Do not re-add an empty `output: {flows: []}`
+  # block without re-verifying against the installed nemoguardrails version.
+  config:
+    sensitive_data_detection:
+      input:
+        entities:
+          - PERSON
+          - EMAIL_ADDRESS
+          - PHONE_NUMBER
+          - CREDIT_CARD
+          - US_SSN
+          - US_BANK_NUMBER
+          - IBAN_CODE
+          - IP_ADDRESS
+          - DATE_TIME
+          - LOCATION
+        score_threshold: 0.3
+      output:
+        entities:
+          - PERSON
+          - EMAIL_ADDRESS
+          - PHONE_NUMBER
+          - CREDIT_CARD
+          - US_SSN
+          - US_BANK_NUMBER
+          - IBAN_CODE
+          - IP_ADDRESS
+          - DATE_TIME
+          - LOCATION
+        score_threshold: 0.3

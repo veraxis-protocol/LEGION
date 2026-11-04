@@ -1,0 +1,725 @@
+component-definition:
+  uuid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+  metadata:
+    title: Cybernetic Governance Engine — ISO 42001 AIMS Component Definition
+    version: 1.0.0
+    oscal-version: 1.0.4
+    last-modified: '2026-10-14T15:54:19Z'
+    remarks: 'This component definition maps technical enforcement components to ISO/IEC
+      42001:2023 Annex A controls. Each implemented requirement links to a Lula validation
+      manifest for automated continuous compliance.
+
+      '
+    props:
+    - name: nist-rmf-integration
+      value: 'true'
+    - name: sp800-53-companion-definition
+      value: compliance/oscal/sp800-53-component-definition.yaml
+    - name: fips199-categorization
+      value: compliance/categorization/FIPS199_CATEGORIZATION.md
+    - name: ssp-outline
+      value: compliance/ssp/SYSTEM_SECURITY_PLAN_OUTLINE.md
+    - name: information-type-registry
+      value: compliance/oscal/information-type-registry.yaml
+    - name: last-nist-rmf-review
+      value: '2026-03-06'
+  components:
+  - uuid: b2c3d4e5-f6a7-8901-bcde-f12345678901
+    title: TypeScript Governance Gateway
+    type: software
+    description: 'Mastra-based Express gateway enforcing multi-tier shielding: Tier
+      1 Aho-Corasick heuristic, NeMo Guardrails, and Tier 3 OPA policy enforcement.
+      All enforcement events are tagged with ISO 42001 control IDs and emitted as
+      OTel spans to Langfuse.
+
+      '
+    purpose: 'Acts as the primary ingress enforcement layer for all AI requests. Blocks
+      prompt injection, toxicity, and policy violations at the network boundary before
+      they reach the LLM inference layer.
+
+      '
+    responsible-roles:
+    - role-id: provider
+    control-implementations:
+    - uuid: c3d4e5f6-a7b8-9012-cdef-123456789012
+      source: https://www.iso.org/standard/81230.html
+      description: ISO/IEC 42001:2023 Annex A controls implemented by the Gateway
+      implemented-requirements:
+      - uuid: d4e5f6a7-b8c9-0123-defa-234567890123
+        control-id: A.5.2
+        description: 'Aho-Corasick Tier-1 and NeMo Guardrails block toxic/injected
+          content at ingress. All blocks are tagged iso42001.control_id=A.5.2 on OTel
+          spans.
+
+          '
+        remarks: 'Implemented in stpaGovernanceMiddleware.ts: stampIsoControl(TIER_1_HEURISTIC).
+          Verified by NeMo output_rail Python traces tagged nemo_output_rail → A.5.2.
+
+          '
+        links:
+        - href: ../../compliance/lula/lula-validation-a52.yaml
+          rel: lula
+          text: 'Lula validation: A.5.2 Social Impact'
+      - uuid: e5f6a7b8-c9d0-1234-efab-345678901234
+        control-id: A.5.3
+        description: 'All governance events emit OTel spans tagged iso42001.control_id=A.5.3,
+          providing a continuous audit trail of AI system activity.
+
+          '
+        remarks: 'Implemented in stpaGovernanceMiddleware.ts: stampIsoControl(TIER_2_SEMANTIC).
+          The compliance-bridge aggregates these spans into a time-windowed safety_rate.
+
+          '
+        links:
+        - href: ../../compliance/lula/lula-validation-a53.yaml
+          rel: lula
+          text: 'Lula validation: A.5.3 Logging and Monitoring'
+  - uuid: f6a7b8c9-d0e1-2345-fabc-456789012345
+    title: Open Policy Agent (OPA)
+    type: software
+    description: 'OPA evaluates Rego policies (finance_policy.rego, system_authz.rego)
+      on every trade execution request. Enforces RBAC role limits, fiscal thresholds,
+      and semantic shielding rules. Decision logs are emitted to stdout and captured
+      by Cloud Logging.
+
+      '
+    purpose: 'Provides deterministic, auditable policy enforcement independent of
+      the LLM reasoning layer. Fiscal limits and RBAC are enforced via declarative
+      Rego rules, not LLM judgment.
+
+      '
+    responsible-roles:
+    - role-id: provider
+    control-implementations:
+    - uuid: a7b8c9d0-e1f2-3456-abcd-567890123456
+      source: https://www.iso.org/standard/81230.html
+      description: ISO/IEC 42001:2023 system constraints implemented by OPA (Universal
+        — applies to all CAGE_DEPLOYMENT_REGION values)
+      implemented-requirements:
+      - uuid: b8c9d0e1-f2a3-4567-bcde-678901234567
+        control-id: A.8.4
+        description: 'finance_policy.rego enforces fiscal limits (junior: $5k/$10k,
+          senior: $500k/$1M) and role-based access control. Manual review thresholds
+          prevent unchecked high-value trade execution. ISO 42001 A.8.4 operational
+          controls for AI system boundary enforcement.
+
+          '
+        remarks: 'Deployment verified by compliance.iso42001/enabled label on opa-compliance-status
+          ConfigMap (deployment/k8s/opa.yaml). Structural assertion — label absence
+          = control not deployed. Universal control — applies to US_FED, EU_ECB, and
+          APAC_MAS deployments.
+
+          '
+        links:
+        - href: ../../compliance/lula/lula-validation-sc4.yaml
+          rel: lula
+          text: 'Lula validation: SC-4 Fiscal Limits (US_FED scope)'
+    - uuid: a7b8c9d0-e1f2-3456-abcd-us-fed-nist01
+      source: https://csrc.nist.gov/publications/detail/sp/800-53/rev-5/final
+      description: NIST SP 800-53 Rev 5 controls implemented by OPA (US_FED only —
+        CAGE_DEPLOYMENT_REGION=US_FED)
+      props:
+      - name: cage-deployment-region
+        value: US_FED
+      - name: cage-posture-scope
+        value: us-federal-only
+      implemented-requirements:
+      - uuid: b8c9d0e1-f2a3-4567-bcde-us-fed-sc4-01
+        control-id: SC-4
+        description: 'NIST SP 800-53 SC-4 (Information in Shared System Resources):
+          finance_policy.rego enforces fiscal limits and RBAC preventing unauthorized
+          information access across shared system resources. US_FED deployment only.
+
+          '
+        remarks: 'US_FED only. NIST SC-4 maps to CAGE custom System Constraint SC-4
+          (fiscal limits). See lula-validation-sc4.yaml for automated assertion. Not
+          applicable to EU_ECB or APAC_MAS deployments.
+
+          '
+        links:
+        - href: ../../compliance/lula/lula-validation-sc4.yaml
+          rel: lula
+          text: 'Lula validation: SC-4 Fiscal Limits (US_FED)'
+  - uuid: c9d0e1f2-a3b4-5678-cdef-789012345678
+    title: NeMo Guardrails + Presidio PII Masking
+    type: software
+    description: 'NVIDIA NeMo Guardrails apply Colang-defined input/output rails.
+      Microsoft Presidio performs PII entity detection and anonymization before any
+      data leaves the cluster to external model APIs.
+
+      '
+    purpose: 'Prevents PII (names, SSNs, account numbers, addresses) from being transmitted
+      to external AI suppliers. Implements data minimization and anonymization at
+      the egress boundary.
+
+      '
+    responsible-roles:
+    - role-id: provider
+    control-implementations:
+    - uuid: d0e1f2a3-b4c5-6789-defa-890123456789
+      source: https://www.iso.org/standard/81230.html
+      description: ISO/IEC 42001:2023 data protection controls
+      implemented-requirements:
+      - uuid: e1f2a3b4-c5d6-7890-efab-901234567890
+        control-id: A.9.2
+        description: 'Presidio masking strips PII from all prompts before they reach
+          external vLLM inference. All masking events are tagged iso42001.control_id=A.9.2
+          in Langfuse.
+
+          '
+        remarks: 'Zero-tolerance control: safety_rate must equal 1.0. Any PII leak
+          triggers immediate Slack/PagerDuty alert via complianceAuditWorkflow alertOnCriticalFailStep.
+
+          '
+        links:
+        - href: ../../compliance/lula/lula-validation-a92.yaml
+          rel: lula
+          text: 'Lula validation: A.9.2 Data Privacy'
+  - uuid: aarm2026-v200-conf-eng-00001111aaaa
+    title: AARM Conformance Engine
+    type: software
+    description: 'CSA AARM (Autonomous Agent Risk Management) conformance layer introduced
+      in CAGE v0.1.0. Consists of three integrated primitives: (1) SHA-256 hash-chained
+      Context Accumulator (context_accumulator.py) providing tamper-evident session
+      state logging; (2) DEFER State Machine (defer_queue.py) implementing a formal
+      fourth governance decision state for confidence-starved execution contexts;
+      (3) 11-vector AARM Threat Ledger (aarm_mapper.py) producing machine-readable
+      AARM Conformance Report Cards auto-serialized to GCS/S3 on every audit run.
+
+      '
+    purpose: 'Provides machine-readable proof that specific CAGE control points neutralize
+      each of the 11 CSA AARM attack vectors, satisfying the AARM Context Accumulator,
+      Deferral Service, and Threat Vector Mapping mandates before proprietary fragmentation
+      can occur.
+
+      '
+    responsible-roles:
+    - role-id: provider
+    props:
+    - name: software-version
+      value: 0.1.0
+    - name: aarm-spec-version
+      value: CSA-AARM-v1.0
+    - name: defer-confidence-threshold
+      value: '0.70'
+    - name: defer-redis-db-index
+      value: '1'
+    - name: defer-redis-maxmemory-policy
+      value: noeviction
+    control-implementations:
+    - uuid: aarm2026-v200-ctrl-impl-00001111
+      source: https://cloudsecurityalliance.org/research/topics/aarm
+      description: CSA AARM v1.0 threat vector neutralizations implemented by CAGE
+      implemented-requirements:
+      - uuid: aarm2026-v1-memory-poisoning
+        control-id: A.5.3
+        description: AARM-V1 Memory Poisoning neutralized by SHA-256 hash-chained
+          Context Accumulator. Any post-hoc mutation to any session state node breaks
+          the chain at the mutated node, detected by verify_integrity().
+        remarks: Implemented in src/compliance_bridge/context_accumulator.py. Hash-chain
+          canonicalization uses RFC 8785 JCS (jcs_canonicalize_plan). The backward-compatibility
+          remediation (BC-01–BC-08, 2026-08-27) migrated the hash chain from json.dumps(sort_keys=True)
+          to RFC 8785 JCS; this was a breaking change. Chain sealed per audit run;
+          root hash embedded in OSCAL Assessment Results.
+        links:
+        - href: ../../compliance/lula/lula-validation-aarm-vectors.yaml
+          rel: lula
+          text: 'Lula validation: AARM Conformance Vectors'
+      - uuid: aarm2026-v2-goal-hijacking
+        control-id: A.5.2
+        description: AARM-V2 Goal Hijacking neutralized by NeMo Guardrails Colang
+          topic lock-down (Layer 0) and OPA declarative goal constraints (Layer 3).
+        remarks: 'NeMo rails: config/rails/. OPA policy: finance_policy.rego.'
+      - uuid: aarm2026-v3-confused-deputy
+        control-id: SC-4
+        description: AARM-V3 Confused Deputy neutralized by KMS-backed ECDSA-P256
+          routing seals (gateway-seal via KMS_GOVERNANCE_KEY) issued exclusively by
+          the gateway and verified with single-use consumption before actuation. The
+          advisor pod runs with zero cloud identity and zero signing keys.
+        remarks: Implemented in src/gateway/governance/routing_seal.py (sign_seal,
+          verify_and_consume_seal) and enforced in src/gateway/governance/consequence_gateway.py.
+      - uuid: aarm2026-v4-cross-agent
+        control-id: SC-8
+        description: AARM-V4 Cross-Agent Propagation neutralized by FiscalLimitGuard
+          atomic pre-reservation (Redis WATCH/MULTI/EXEC) and Linkerd mTLS for all
+          intra-cluster agent communications.
+        remarks: 'FiscalLimitGuard: src/gateway/governance/fiscal_limit_guard.py.'
+      - uuid: aarm2026-v7-context-overflow
+        control-id: A.8.4
+        description: AARM-V7 Context Window Overflow neutralized by DEFER State Machine.
+          Execution context with confidence_score < 0.70 is parked in Redis DeferQueue
+          (db=1, noeviction) pending automated data injection, preventing the agent
+          from proceeding on fundamentally incomplete context.
+        remarks: 'Confidence-Starvation Boundary: 0.70. See UCA-7 in ontology.py.
+          Implemented in src/gateway/governance/defer_queue.py.'
+      - uuid: aarm2026-v11-model-subst
+        control-id: SC-8
+        description: AARM-V11 Model Substitution neutralized by sovereign vLLM deployment
+          on GKE (no external LLM API calls) and KMS-signed governance routing seals
+          (src/gateway/governance/routing_seal.py).
+        remarks: 'CMEK guard: src/compliance_bridge/cmek_guard.py. POAM-012.'
+    - uuid: aarm2026-v200-ctrl-impl-iso-00002222
+      source: https://www.iso.org/standard/81230.html
+      description: ISO 42001 controls providing the foundational evidence basis for
+        AARM conformance
+      implemented-requirements:
+      - uuid: aarm2026-iso-a53-chain
+        control-id: A.5.3
+        description: Context Accumulator provides tamper-evident, append-only audit
+          trail satisfying ISO 42001 Annex A.5.3 chain-of-custody requirements. chain_root
+          and chain_sealed_utc embedded in every OSCAL Assessment Results document.
+        remarks: 'ISO 42001 A.5.3 §b: records of AI system monitoring. Chain is auto-persisted
+          to GCS/S3 as <audit_id>/context_chain.ndjson.'
+        links:
+        - href: ../../compliance/lula/lula-validation-a53.yaml
+          rel: lula
+          text: 'Lula validation: A.5.3 Logging and Monitoring'
+      - uuid: aarm2026-iso-a84-defer
+        control-id: A.8.4
+        description: DEFER State Machine satisfies ISO 42001 Annex A.8.4 operational
+          controls by implementing a formal pause state for ambiguous execution contexts,
+          preventing unsafe AI operation under data starvation.
+        remarks: 'Three-way Confidence-Starvation Boundary: 0.95 (execute), 0.70-0.95
+          (review), <0.70 (defer). Approved CAGE v0.1.0 architectural decision.'
+    - uuid: tqp007-component-0001-0000-0000-000000000001
+      title: TokenQuotaProxy
+      type: software
+      description: 'Kubernetes sidecar that enforces per-agent token spending quotas
+        to prevent resource exhaustion and denial-of-governance attacks. Uses Redis
+        as a distributed counter backend. When Redis is unavailable, the proxy must
+        fail-CLOSED (deny all inference requests) rather than fail-OPEN (allow uncapped
+        token spending). CTRL_TQP_007 asserts that the fail-closed behavior is configured
+        at deployment time.
+
+        '
+      purpose: 'Prevents denial-of-governance via uncapped LLM token spending. Implements
+        ISO 42001 §A.8.4 AI System Operation Controls (resource constraint enforcement)
+        and is a compensating control for STPA hazard H-7.
+
+        '
+      responsible-roles:
+      - role-id: provider
+      control-implementations:
+      - uuid: tqp007-ctrl-impl-0001-0000-0000-000000000001
+        source: https://www.iso.org/standard/81230.html
+        description: ISO/IEC 42001:2023 Annex A.8.4 controls implemented by TokenQuotaProxy
+        implemented-requirements:
+        - uuid: tqp007-req-0001-0000-0000-000000000001
+          control-id: A.8.4
+          description: 'CTRL_TQP_007: TokenQuotaProxy enforces token spending quotas
+            to prevent resource exhaustion. When Redis is unavailable, TOKEN_QUOTA_FAIL_CLOSED=true
+            causes the proxy to deny all inference requests rather than allowing uncapped
+            spending (fail-open). This implements ISO 42001 §A.8.4 AI System Operation
+            Controls — specifically the requirement that AI system resource constraints
+            are enforced even during dependency failures.
+
+            '
+          remarks: 'Implemented as an env var TOKEN_QUOTA_FAIL_CLOSED=true on the
+            token-quota-proxy Deployment in the governance-stack namespace. Lula validation
+            asserts this configuration is present at runtime. STPA hazard: H-7 (TokenQuotaProxy
+            fail-OPEN scenario). POAM reference: ISO-004 (POAM_ISO42001.md).
+
+            '
+          links:
+          - href: ../../compliance/lula/lula-validation-tqp007.yaml
+            rel: lula
+  - uuid: f10a5e8d-4b2c-5f99-8c3a-d41f7e8b9c2f
+    title: FlowSignal Consequence Authority Integration
+    type: software
+    description: 'FlowSignal (provider_01) integration providing distributed consequence
+      authority verification and single-use consumption enforcement. Implements a
+      two-phase consequence token model: governance evaluation (OPA + FlowSignal authority
+      determination) produces a short-TTL, single-use, KMS-signed ConsequenceToken
+      (JWS) that execution adapters verify and atomically consume via Redis (SET NX
+      PX) before side-effects execute. Key namespace: flowsignal:token:* (90s TTL,
+      exceeds 60s token TTL by safety margin). Prevents TOCTOU attacks on authority
+      consumption and substitution attacks via binding-hash verification.
+
+
+      Phase 2 (Consolidation & Crypto) capabilities: ConsequenceToken JWS mint/verify
+      (src/gateway/governance/consequence_token.py) with 8 claims (sub, tid, rec,
+      act, ver, iat, exp, jti), 60s TTL, KMS-signed via KMSGovernanceSigner, rejects
+      alg:none and algorithm confusion attacks. ConsequenceGateway (library primitive
+      for normative-provider tokens; not on the governor ALLOW path, whose boundary
+      is verify_and_consume_seal: verify the routing seal, then consume its nonce)
+      6-step evaluation (src/gateway/governance/consequence_gateway.py): JWS signature
+      verification, TTL check, action digest recomputation via RFC 8785 JCS canonicalization,
+      digest comparison (TOCTOU closure), atomic single-use consumption, EXECUTE/HOLD/BLOCK
+      decision with reason codes (OK, TOKEN_INVALID, ACTION_BINDING_MISMATCH, REDIS_ERROR,
+      ALREADY_CONSUMED, AUTHORITY_RECORD_BINDING_MISMATCH). Evidence pipeline migrated
+      to RFC 8785 JCS (JSON Canonicalization Scheme) for deterministic cross-platform
+      hashing. R5 mitigation: JWS token log-scrubbing via pii_sanitizer.py regex pattern
+      (eyJ-anchored 3-segment base64url) and key-based denylist (token, consequence_token,
+      jws, jwt, bearer_token).
+
+      '
+    purpose: 'Provides cryptographically-verifiable consequence authority for high-stakes
+      AI governance decisions, bridging external normative providers (FlowSignal)
+      with CAGE''s execution boundary. Implements ISO 42001 §A.8.4 AI System Operation
+      Controls — specifically the requirement that authority decisions are tamper-evident,
+      single-use, and bound to specific execution contexts. Phase 2 adds cryptographic
+      integrity (KMS-signed JWS), deterministic evidence canonicalization (RFC 8785
+      JCS), and comprehensive TOCTOU/replay/substitution defenses.
+
+      '
+    responsible-roles:
+    - role-id: provider
+    props:
+    - name: software-version
+      value: 0.2.0
+    - name: redis-key-namespace
+      value: flowsignal:token:*
+    - name: token-ttl-seconds
+      value: '60'
+    - name: consumption-marker-ttl-seconds
+      value: '90'
+    - name: normative-provider-slot
+      value: provider_01
+    - name: phase-2-jcs-canonicalization
+      value: 'true'
+    - name: phase-2-consequence-gateway
+      value: src/gateway/governance/consequence_gateway.py
+    - name: phase-2-consequence-token
+      value: src/gateway/governance/consequence_token.py
+    - name: kms-signing-algorithm
+      value: variable (ES256/ES384/EdDSA/PS256/RS256)
+    - name: jws-claims-count
+      value: '8'
+    - name: clock-skew-tolerance-seconds
+      value: '5'
+    control-implementations:
+    - uuid: a20b6f9e-5c3d-6a00-9d4b-e52a8f9c0d3a
+      source: https://www.iso.org/standard/81230.html
+      description: ISO/IEC 42001:2023 Annex A.8.4 controls implemented by FlowSignal
+        consequence authority integration
+      implemented-requirements:
+      - uuid: b31c7a0f-6d4e-7b11-0e5c-f63b9a0d1e4b
+        control-id: A.8.4
+        description: 'FLOWSIGNAL-001: FlowSignal consequence authority integration
+          enforces distributed single-use consumption for AI governance decisions.
+          The ConsequenceAuthorityStore (src/gateway/governance/consequence_authority_store.py)
+          uses atomic Redis SET NX PX operations to prevent replay attacks and TOCTOU
+          race conditions across N GKE replicas. CAGE_NORMATIVE_PROVIDER=provider_01
+          is configured via env var (not hardcoded), enabling runtime provider selection.
+          FlowSignal mTLS secrets (FLOWSIGNAL_CLIENT_CERT, FLOWSIGNAL_CLIENT_KEY,
+          FLOWSIGNAL_CA_BUNDLE) must be referenced via secretKeyRef when present —
+          never inline value: fields. Redis key namespace flowsignal:token:* is isolated
+          from existing prefixes (fiscal:*, DEFER:*, safety:*) to prevent cross-concern
+          key collisions. This implements ISO 42001 §A.8.4 AI System Operation Controls
+          — specifically the requirement that consequence authority is cryptographically
+          bound, tamper-evident, and enforced at the execution boundary.
+
+
+          Phase 2 extensions: ConsequenceToken JWS (src/gateway/governance/consequence_token.py)
+          provides KMS-signed cryptographic binding between governance evaluation
+          and execution. 8-claim structure (sub=actor_id, tid=thread_id, rec=authority_record_id,
+          act=SHA256(JCS(action_payload)), ver=authority_state_version, iat/exp, jti)
+          enforces temporal validity (60s TTL with 5s clock-skew tolerance), action
+          integrity (recomputed digest comparison), and single-use semantics (rec
+          == jti). ConsequenceGateway (src/gateway/governance/consequence_gateway.py)
+          is the single-use boundary for normative-provider ConsequenceTokens and
+          is not on the governor ALLOW path (there, verify_and_consume_seal verifies
+          the routing seal and only then consumes its nonce). It implements vendor-agnostic
+          6-step evaluation: (1) JWS signature verification via KMSGovernanceSigner.verify_raw(),
+          (2) TTL check, (3-4) action digest recomputation and comparison (TOCTOU
+          closure), (5) atomic consumption via ConsequenceAuthorityStore.consume_once()
+          with binding-hash verification (substitution defense), (6) EXECUTE/HOLD/BLOCK
+          decision with structured reason codes. Fails closed on all errors (TOKEN_INVALID,
+          REDIS_ERROR, ACTION_BINDING_MISMATCH, ALREADY_CONSUMED, AUTHORITY_RECORD_BINDING_MISMATCH).
+          Evidence pipeline migrated to RFC 8785 JSON Canonicalization Scheme (JCS)
+          for deterministic cross-platform/cross-language evidence hashing (replaces
+          json.dumps(sort_keys=True) in the former normative_provider.py async FRIA
+          attestation, removed by refactor/fria-jurisdiction). R5 mitigation: pii_sanitizer.py
+          JWS log-scrubbing via eyJ-anchored regex pattern plus key-based denylist
+          (token, consequence_token, jws, jwt, bearer_token) prevents ConsequenceToken
+          leakage in audit logs and Langfuse telemetry.
+
+          '
+        remarks: 'Implemented across Phase 1 and Phase 2 of the FlowSignal integration
+          plan (plans/flowsignal_integration_implementation_plan.md). Phase 1: ConsequenceAuthorityStore
+          distributed atomicity guarantees via Redis SET NX PX. Phase 2: ConsequenceToken
+          KMS-signed JWS, ConsequenceGateway 6-step verification (normative-provider
+          tokens only; not on the governor ALLOW path), RFC 8785 JCS evidence canonicalization,
+          R5 log-scrubbing. Binding hash (SHA-256 of thread_id:actor_id:action_digest:authority_state_version)
+          stored as the marker value enables substitution-attack detection. Reference
+          architecture: Lula validation enforces illustrative patterns; adopters should
+          adapt namespace prefixes, secret names, and KMS key configurations to their
+          environments.
+
+          '
+        links:
+        - href: ../../compliance/lula/lula-validation-flowsignal.yaml
+          rel: lula
+  - uuid: b6b7-2026-cer-disclosure-00001111aaaa
+    title: Compliance Evidence Repository (CER) Disclosure Infrastructure
+    type: software
+    description: 'CER Disclosure Infrastructure providing tamper-evident, content-addressed
+      evidence disclosure to external normative providers and auditors. Implements
+      a three-posture disclosure model: PUBLIC (unrestricted access, public internet
+      distribution), PRIVATE (authenticated access only, no public distribution),
+      and EMBARGO (time-locked disclosure with explicit release date). Evidence records
+      are indexed via SHA-256 and SHA-512 multihash identifiers, stored in write-once
+      evidence repositories (GCS/S3), and disclosed via signed manifest files containing
+      content-addressing metadata. Disclosure posture is determined at evidence capture
+      time and enforced cryptographically through access control and distribution
+      policies.
+
+      '
+    purpose: 'Provides verifiable evidence disclosure to normative providers (FlowSignal,
+      external auditors) while maintaining confidentiality boundaries appropriate
+      to each deployment region''s regulatory posture. Implements ISO 42001 §A.8.4
+      operational transparency requirements — specifically the mandate that AI system
+      operation controls are auditable by authorized external parties. Satisfies NIST
+      SP 800-53 AU-16 (Cross-Organizational Audit Information Sharing) for US_FED
+      deployments.
+
+      '
+    responsible-roles:
+    - role-id: provider
+    props:
+    - name: software-version
+      value: 0.1.0
+    - name: source-file-disclosure
+      value: src/gateway/governance/evidence/disclosure.py
+    - name: source-file-exporter
+      value: src/gateway/governance/oscal_ssp_exporter.py
+    - name: source-file-index
+      value: src/gateway/governance/evidence/index.py
+    - name: hash-algorithms
+      value: SHA-256, SHA-512
+    - name: content-addressing-scheme
+      value: multihash (sha256- / sha512- prefix)
+    control-implementations:
+    - uuid: b6b7-ctrl-impl-iso42001-00001111
+      source: https://www.iso.org/standard/81230.html
+      description: ISO/IEC 42001:2023 Annex A.8.4 controls implemented by CER Disclosure
+        Infrastructure
+      implemented-requirements:
+      - uuid: b6b7-req-a84-cer-00001111
+        control-id: A.8.4
+        description: 'CER Disclosure Infrastructure implements ISO 42001 §A.8.4 operational
+          transparency by providing tamper-evident evidence disclosure to authorized
+          normative providers and auditors. Three disclosure postures satisfy regional
+          regulatory requirements: PUBLIC posture (unrestricted access, content-addressed
+          manifest files distributed via public URLs) satisfies open-governance mandates
+          in US_FED deployments where OMB A-130 requires transparency-by-default for
+          federal AI systems. PRIVATE posture (authenticated access only, no public
+          distribution) satisfies EU_ECB data minimization requirements under GDPR
+          Article 5(1)(c) where evidence disclosure is limited to authorized supervisory
+          authorities. EMBARGO posture (time-locked disclosure with explicit release
+          date) satisfies APAC_MAS pre-approval requirements where evidence must be
+          retained internally until regulatory clearance is granted. Evidence records
+          are indexed via SHA-256 and SHA-512 multihash identifiers (multihash format:
+          sha256-<hex-digest> / sha512-<hex-digest>), ensuring content-addressable
+          verification across organizational boundaries. Disclosure manifest files
+          are cryptographically signed via KMS to prevent tampering and provide non-repudiation.
+          This implements ISO 42001 §A.8.4 AI System Operation Controls — specifically
+          the requirement that operational evidence is available to authorized parties
+          in a verifiable, tamper-evident format.
+
+          '
+        remarks: 'Disclosure posture is determined at evidence capture time via CAGE_CER_DISCLOSURE_POSTURE
+          environment variable (PUBLIC | PRIVATE | EMBARGO). Posture enforcement is
+          cryptographic — PUBLIC evidence is written to publicly-readable GCS/S3 buckets
+          with unrestricted IAM policies, PRIVATE evidence requires authenticated
+          access tokens, EMBARGO evidence carries time-lock metadata enforced at manifest
+          generation. Reference architecture: adopters should adapt disclosure postures,
+          hash algorithms, and content-addressing schemes to their regulatory environments.
+          Default posture is PRIVATE (fail-closed on disclosure).
+
+          '
+        links:
+        - href: ../../compliance/lula/lula-validation-cer-disclosure.yaml
+          rel: lula
+  - uuid: tls-infra-2026-0827-sc8-000000000001
+    title: TLS Infrastructure
+    type: software
+    description: 'Hardened TLS client context factory (src/gateway/infrastructure/tls_context.py::create_hardened_client_context)
+      enforcing NIST SP 800-52 Rev. 2 minimum TLS 1.2+ protocol version. Pins ssl.TLSVersion.TLSv1_2
+      as minimum_version and explicitly disables legacy protocols via OP_NO_TLSv1
+      and OP_NO_TLSv1_1 options. Used by all external HTTP/HTTPS client connections
+      in CAGE (OPA policy sync, vLLM inference, Langfuse telemetry, external normative
+      provider adapters). Remediates POAM-2026-011.
+
+      '
+    purpose: 'Provides cryptographic transmission confidentiality for all external
+      client connections, preventing downgrade attacks to TLS 1.0/1.1 and enforcing
+      NIST SP 800-52 Rev. 2 cipher suite requirements. Implements SC-8 (Transmission
+      Confidentiality and Integrity) for US_FED deployments.
+
+      '
+    responsible-roles:
+    - role-id: provider
+    props:
+    - name: software-version
+      value: 0.1.0
+    - name: source-file
+      value: src/gateway/infrastructure/tls_context.py
+    - name: remediation-commit
+      value: c8d66189a94cb782f4e0f61e14e05e341d27a8f6
+    - name: nist-sp-800-52-rev2-compliant
+      value: 'true'
+    control-implementations:
+    - uuid: tls-ctrl-impl-2026-0827-sc8-us-fed-001
+      source: https://csrc.nist.gov/publications/detail/sp/800-53/rev-5/final
+      description: NIST SP 800-53 Rev 5 SC-8 (Transmission Confidentiality and Integrity)
+        implemented by TLS Infrastructure (US_FED only — CAGE_DEPLOYMENT_REGION=US_FED)
+      props:
+      - name: cage-deployment-region
+        value: US_FED
+      - name: cage-posture-scope
+        value: us-federal-only
+      implemented-requirements:
+      - uuid: tls-req-2026-0827-sc8-us-fed-001
+        control-id: SC-8
+        description: 'NIST SP 800-53 SC-8 (Transmission Confidentiality and Integrity):
+          TLS 1.2+ enforcement via canonical hardened SSL context factory (src/gateway/infrastructure/tls_context.py::create_hardened_client_context),
+          pinning minimum_version=TLSv1_2 and disabling legacy protocols (OP_NO_TLSv1/TLSv1_1).
+          Remediates POAM-2026-011. Complies with NIST SP 800-52 Rev. 2 minimum protocol
+          version requirements. US_FED deployment only.
+
+          '
+        remarks: 'US_FED only. Test coverage: tests/test_tls_enforcement.py::TestTlsProtocolStandards::test_default_client_context_minimum_version
+          and test_legacy_tls_protocols_disabled confirm ssl.TLSVersion.TLSv1_2 minimum
+          version and OP_NO_TLSv1/TLSv1_1 option enforcement. Not applicable to EU_ECB
+          or APAC_MAS deployments (those regions may have different cryptographic
+          standards).
+
+          '
+        links:
+        - href: ../../compliance/lula/lula-validation-sc8.yaml
+          rel: lula
+          text: 'Lula validation: SC-8 Transmission Confidentiality (US_FED)'
+  - uuid: e5000099-stpa-4000-8000-compiler00001
+    title: STPA-to-Policy Compiler
+    type: software
+    description: 'CLI compiler (src/gateway/governance/stpa_compiler.py) that ingests
+      config/stpa_control_structure.yaml and generates deterministic OPA Rego, NeMo
+      Colang, and Python validator artifacts enforcing STAMP/STPA UCAs at runtime.
+      Eliminates manual policy drift by treating the YAML as the single authoritative
+      source of truth. System: CAGE Financial Advisor v1.1.0.'
+    purpose: Provides compile-time enforcement of STPA UCAs, bridging design-time
+      hazard analysis (MIT STAMP methodology) with runtime OPA/NeMo/Python governance
+      controls. Closes the compliance loop between safety engineering artefacts and
+      live cluster enforcement policies.
+    responsible-roles:
+    - role-id: compliance-engineer
+    props:
+    - name: software-version
+      value: 1.1.0
+    - name: source-file
+      value: src/gateway/governance/stpa_compiler.py
+    - name: control-structure-input
+      value: config/stpa_control_structure.yaml
+    - name: last-compiled
+      value: '2026-10-14T15:54:19Z'
+    - name: uca-count
+      value: '12'
+    control-implementations:
+    - uuid: c3000099-stpa-4000-8000-compiler00001
+      source: https://www.iso.org/standard/81230.html
+      description: ISO/IEC 42001:2023 controls implemented by the STPA compiler
+      implemented-requirements:
+      - uuid: d4000099-stpa-4000-8000-0000000
+        control-id: A.8.4
+        description: 'STPA compiler generates deterministic enforcement artifacts
+          for A.8.4 (AI System Operation — Runtime operational controls) from config/stpa_control_structure.yaml.
+          UCAs: UCA-1, UCA-12, UCA-13, UCA-2, UCA-4, UCA-5, UCA-6, UCA-8, UCA-9.'
+        remarks: Implemented via stpa_compiler.py compile command. Re-run on any YAML
+          change to keep artifacts in sync.
+      - uuid: d4000099-stpa-4000-8000-0001001
+        control-id: A.9.4
+        description: 'STPA compiler generates deterministic enforcement artifacts
+          for A.9.4 (Monitoring and measurement — Live telemetry validation) from
+          config/stpa_control_structure.yaml. UCAs: UCA-10.'
+        remarks: Implemented via stpa_compiler.py compile command. Re-run on any YAML
+          change to keep artifacts in sync.
+      - uuid: d4000099-stpa-4000-8000-0002002
+        control-id: A.6.2
+        description: 'STPA compiler generates deterministic enforcement artifacts
+          for A.6.2 (AI System Lifecycle — Design and development controls) from config/stpa_control_structure.yaml.
+          UCAs: UCA-12, UCA-13, UCA-2, UCA-5, UCA-6.'
+        remarks: Implemented via stpa_compiler.py compile command. Re-run on any YAML
+          change to keep artifacts in sync.
+      - uuid: d4000099-stpa-4000-8000-0003003
+        control-id: A.9.2
+        description: 'STPA compiler generates deterministic enforcement artifacts
+          for A.9.2 (Data transfer to suppliers and third parties / PII protection)
+          from config/stpa_control_structure.yaml. UCAs: UCA-3.'
+        remarks: Implemented via stpa_compiler.py compile command. Re-run on any YAML
+          change to keep artifacts in sync.
+      - uuid: d4000099-stpa-4000-8000-0004004
+        control-id: A.5.2
+        description: 'STPA compiler generates deterministic enforcement artifacts
+          for A.5.2 (Social impact — AI system impact on society and environment)
+          from config/stpa_control_structure.yaml. UCAs: UCA-7.'
+        remarks: Implemented via stpa_compiler.py compile command. Re-run on any YAML
+          change to keep artifacts in sync.
+  - uuid: ftra0001-4e47-bbc8-irreversibility01
+    title: FTRA Irreversibility Classifier
+    type: software
+    description: 'Forward-Looking Trajectory Reachability Analyzer (FTRA, Tier 0.5):
+      classifies each tool call against the active domain''s digest-covered terminal
+      registry, records the registry provenance of the classification, and lets a
+      registered terminal clear without a human only inside its signed autonomous
+      envelope. It validates no parameter values; value policy is owned by STPA UCA
+      rules and the domain OPA policy (docs/governance/FTRA_SCOPE.md).'
+    purpose: Irreversibility classification and autonomous-envelope gating for tool
+      execution
+    responsible-roles:
+    - role-id: provider
+    props:
+    - name: source-file
+      value: src/gateway/governance/governor/stages/ftra.py
+    - name: last-compiled
+      value: '2026-10-14T15:54:19Z'
+    control-implementations:
+    - uuid: ftra0001-ctrl-impl-8000-classifier01
+      source: https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home
+      description: NIST SP 800-53 Rev 5 HIGH-baseline controls implemented by FTRA
+        Irreversibility Classifier
+      implemented-requirements:
+      - uuid: si100001-ftra-8000-classifier00001
+        control-id: si-10
+        description: FTRA (Tier 0.5) classifies each tool call against the digest-covered
+          terminal registry (src/gateway/governance/ftra/classifier.py) and routes
+          irreversible or unregistered actions to human review; a registered terminal
+          clears autonomously only inside its signed autonomous envelope with a known,
+          finite, positive magnitude (src/gateway/governance/ftra/autonomy.py). Parameter
+          value validation (SI-10) is enforced by STPA UCA rules (src/cage_finance/stpa/uca_rules.py)
+          and the domain OPA policy (src/cage_finance/opa/trade_governance.rego);
+          injection is mitigated by NeMo/AGP rails generated from UCA-7 (config/rails/generated_stpa_rails.co,
+          config/agp/generated_semantic_policy.txt). Before parking a REQUIRE_APPROVAL
+          token for human review, run_pipeline() previews every claiming phase-2 barrier
+          side-effect-free (Phase2Mode.PREVIEW in src/gateway/governance/governor/pipeline.py),
+          denying outright on HARD barrier breaches and recording NARROWABLE barrier
+          bounds (Violation.bound in src/gateway/governance/contracts.py) on the DeferToken
+          snapshot. The registry's manifest_sha256 (registry_digest in src/gateway/governance/ftra/classifier.py)
+          covers the autonomous_envelope together with the terminals, so a tampered
+          ceiling fails the load-time integrity check.
+        props:
+        - name: implementation-status
+          value: implemented
+        - name: control-origination
+          value: system-specific
+        links:
+        - href: https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home?element=SI-10
+          rel: reference
+  back-matter:
+    resources:
+    - uuid: f2a3b4c5-d6e7-8901-fabc-012345678901
+      title: ISO/IEC 42001:2023 Standard
+      rlinks:
+      - href: https://www.iso.org/standard/81230.html
+    - uuid: a3b4c5d6-e7f8-9012-abcd-123456789012
+      title: Lula Compliance Automation Tool
+      rlinks:
+      - href: https://github.com/defenseunicorns/lula
+    - uuid: b4c5d6e7-f8a9-0123-bcde-234567890123
+      title: OSCAL (Open Security Controls Assessment Language)
+      rlinks:
+      - href: https://pages.nist.gov/OSCAL/
+    - uuid: csa2026-aarm-spec-reference-000001
+      title: CSA Autonomous Agent Risk Management (AARM) Specification v1.0
+      rlinks:
+      - href: https://cloudsecurityalliance.org/research/topics/aarm

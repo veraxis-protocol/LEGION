@@ -1,0 +1,50 @@
+test_100_provider_driven_effects_synthetic (test_oracle.JudgeFalsification.test_100_provider_driven_effects_synthetic) ... ok
+test_OR01_complete_goal_native (test_oracle.JudgeFalsification.test_OR01_complete_goal_native) ... ok
+test_OR02_false_done (test_oracle.JudgeFalsification.test_OR02_false_done) ... ok
+test_OR03_quantifier_partial (test_oracle.JudgeFalsification.test_OR03_quantifier_partial) ... ok
+test_OR04_tool_says_success_native_not (test_oracle.JudgeFalsification.test_OR04_tool_says_success_native_not) ... ok
+test_OR05_goal_met_but_authority_invalid (test_oracle.JudgeFalsification.test_OR05_goal_met_but_authority_invalid) ... ok
+test_OR06_cage_denied_native_effect (test_oracle.JudgeFalsification.test_OR06_cage_denied_native_effect) ... ok
+test_OR07_ztl_false_effect (test_oracle.JudgeFalsification.test_OR07_ztl_false_effect) ... ok
+test_OR08_revoked_epoch (test_oracle.JudgeFalsification.test_OR08_revoked_epoch) ... ok
+test_OR09_duplicate_command_effect (test_oracle.JudgeFalsification.test_OR09_duplicate_command_effect) ... ok
+test_OR10_stale_claim (test_oracle.JudgeFalsification.test_OR10_stale_claim) ... ok
+test_OR11_cross_shard_dependency_early (test_oracle.JudgeFalsification.test_OR11_cross_shard_dependency_early) ... ok
+test_OR12_model_digest_mismatch (test_oracle.JudgeFalsification.test_OR12_model_digest_mismatch) ... ok
+test_OR13_lost_reply_native_recovery (test_oracle.JudgeFalsification.test_OR13_lost_reply_native_recovery) ... ok
+test_OR14_bad_reconcile (test_oracle.JudgeFalsification.test_OR14_bad_reconcile) ... ok
+test_OR15_monotonic_clock_ignores_wall_clock (test_oracle.JudgeFalsification.test_OR15_monotonic_clock_ignores_wall_clock) ... ok
+test_OR16_deadline_exceeded (test_oracle.JudgeFalsification.test_OR16_deadline_exceeded) ... ok
+test_OR17_act_before_event_legal_time (test_oracle.JudgeFalsification.test_OR17_act_before_event_legal_time) ... ok
+test_OR18_zero_write_search (test_oracle.JudgeFalsification.test_OR18_zero_write_search) ... ok
+test_OR19_refusal_as_goal (test_oracle.JudgeFalsification.test_OR19_refusal_as_goal) ... ok
+test_OR20_safe_stop_not_completion (test_oracle.JudgeFalsification.test_OR20_safe_stop_not_completion) ... ok
+test_OR21_missing_native_readback (test_oracle.JudgeFalsification.test_OR21_missing_native_readback) ... ok
+test_OR22_untriggered_conditional (test_oracle.JudgeFalsification.test_OR22_untriggered_conditional) ... ok
+test_OR23_triggered_conditional_missing_effect (test_oracle.JudgeFalsification.test_OR23_triggered_conditional_missing_effect) ... ok
+test_OR24_read_role_counts_without_mutation (test_oracle.JudgeFalsification.test_OR24_read_role_counts_without_mutation) ... ok
+test_OR25_100_identities_one_model (test_oracle.JudgeFalsification.test_OR25_100_identities_one_model) ... ok
+test_OR26_trace_truncated (test_oracle.JudgeFalsification.test_OR26_trace_truncated) ... ok
+test_OR27_forged_receipt_native_contradiction (test_oracle.JudgeFalsification.test_OR27_forged_receipt_native_contradiction) ... ok
+test_OR28_semantic_dispute_unresolved (test_oracle.JudgeFalsification.test_OR28_semantic_dispute_unresolved) ... ok
+test_OR29_wrong_scenario_identity (test_oracle.JudgeFalsification.test_OR29_wrong_scenario_identity) ... ok
+test_OR30_tampered_evidence_detected (test_oracle.JudgeFalsification.test_OR30_tampered_evidence_detected) ... ok
+test_all_13_structural_synthetic_positive (test_oracle.JudgeFalsification.test_all_13_structural_synthetic_positive) ... ok
+test_fenced_claim_required_by_contract (test_oracle.JudgeFalsification.test_fenced_claim_required_by_contract) ... ok
+test_forbidden_effect_even_with_matching_goal (test_oracle.JudgeFalsification.test_forbidden_effect_even_with_matching_goal) ... ok
+test_invalid_cyclic_dependency (test_oracle.JudgeFalsification.test_invalid_cyclic_dependency) ... ok
+test_model_digest_self_consistency (test_oracle.JudgeFalsification.test_model_digest_self_consistency) ... ok
+test_orphan_receipt_never_passes (test_oracle.JudgeFalsification.test_orphan_receipt_never_passes) ... ok
+test_replay_deterministic_same_bytes (test_oracle.JudgeFalsification.test_replay_deterministic_same_bytes) ... ok
+test_resource_budget (test_oracle.JudgeFalsification.test_resource_budget) ... ok
+test_seal_invalid (test_oracle.JudgeFalsification.test_seal_invalid) ... ok
+test_source_split_aggregate_counted (test_oracle.JudgeFalsification.test_source_split_aggregate_counted) ... ok
+test_undocumented_effect_readback_is_indeterminate (test_oracle.JudgeFalsification.test_undocumented_effect_readback_is_indeterminate) ... ok
+test_untriggered_event_write_is_fail (test_oracle.JudgeFalsification.test_untriggered_event_write_is_fail) ... ok
+test_untrusted_origin_never_pass (test_oracle.JudgeFalsification.test_untrusted_origin_never_pass) ... ok
+test_zero_denominator_is_null (test_oracle.JudgeFalsification.test_zero_denominator_is_null) ... ok
+
+----------------------------------------------------------------------
+Ran 45 tests in 0.019s
+
+OK

@@ -1,0 +1,221 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""
+tests/test_security_fixes.py
+
+Regression tests for Sprint 1 Critical security findings.
+
+C-01 — Trade side inversion (tools.py):
+    Verifies that execute_trade() uses the requested side ("sell") rather than
+    the previously hardcoded "buy", and that an invalid side is rejected.
+
+C-02 — CBF fail-closed on Redis unavailability:
+    The original regression tests exercised ``compute_nemo_context()``, which
+    was deleted with the dead NeMo pre-check path. CBF fail-closed behaviour on
+    Redis errors is covered in tests/test_cbf_chaos.py and
+    tests/test_cbf_negative_paths.py.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+import uuid
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+pytestmark = pytest.mark.unit
+
+
+# ---------------------------------------------------------------------------
+# C-01 — Trade side inversion
+# ---------------------------------------------------------------------------
+
+
+class TestC01TradeSide:
+    """C-01: execute_trade() must forward the requested side, not hardcode 'buy'."""
+
+    @pytest.mark.asyncio
+    async def test_sell_order_sends_sell_to_broker(self):
+        """A sell order must reach the broker with side='sell'."""
+        from src.cage_finance.models.trade_order import TradeOrder
+        from src.cage_finance.tools.trade_executor import execute_trade
+
+        tx_id = str(uuid.uuid4())
+        order = TradeOrder(
+            symbol="AAPL",
+            amount=50,
+            currency="USD",
+            side="sell",
+            type="market",
+            confidence=0.95,
+            transaction_id=tx_id,
+        )
+
+        captured_payload: dict = {}
+
+        def _fake_post(url, json=None, headers=None, **kwargs):
+            captured_payload.update(json or {})
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {"id": "order-sell-001"}
+            mock_resp.raise_for_status.return_value = None
+            return mock_resp
+
+        with (
+            patch("src.cage_finance.tools.trade_executor.redis_client") as mock_redis,
+            patch("requests.post", side_effect=_fake_post),
+            patch.dict(
+                os.environ,
+                {
+                    "BROKER_API_KEY": "test-key",
+                    "BROKER_API_SECRET": "test-secret",
+                    "USE_MOCK_BROKER": "false",
+                },
+            ),
+        ):
+            mock_redis.get.return_value = None  # no safety violation
+
+            result = await execute_trade(order, routing_seal="test-seal-c01-sell")
+
+        assert captured_payload.get("side") == "sell", (
+            f"Expected side='sell' in broker payload but got: {captured_payload}"
+        )
+        assert "EXECUTED" in result
+
+    @pytest.mark.asyncio
+    async def test_buy_order_sends_buy_to_broker(self):
+        """A buy order must reach the broker with side='buy'."""
+        from src.cage_finance.models.trade_order import TradeOrder
+        from src.cage_finance.tools.trade_executor import execute_trade
+
+        tx_id = str(uuid.uuid4())
+        order = TradeOrder(
+            symbol="MSFT",
+            amount=10,
+            currency="USD",
+            side="buy",
+            type="market",
+            confidence=0.90,
+            transaction_id=tx_id,
+        )
+
+        captured_payload: dict = {}
+
+        def _fake_post(url, json=None, headers=None, **kwargs):
+            captured_payload.update(json or {})
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {"id": "order-buy-001"}
+            mock_resp.raise_for_status.return_value = None
+            return mock_resp
+
+        with (
+            patch("src.cage_finance.tools.trade_executor.redis_client") as mock_redis,
+            patch("requests.post", side_effect=_fake_post),
+            patch.dict(
+                os.environ,
+                {
+                    "BROKER_API_KEY": "test-key",
+                    "BROKER_API_SECRET": "test-secret",
+                    "USE_MOCK_BROKER": "false",
+                },
+            ),
+        ):
+            mock_redis.get.return_value = None
+
+            result = await execute_trade(order, routing_seal="test-seal-c01-buy")
+
+        assert captured_payload.get("side") == "buy", (
+            f"Expected side='buy' in broker payload but got: {captured_payload}"
+        )
+        assert "EXECUTED" in result
+
+    @pytest.mark.asyncio
+    async def test_invalid_side_raises_assertion_error(self):
+        """An order with an invalid side must be rejected before any broker call."""
+        from src.cage_finance.models.trade_order import TradeOrder
+        from src.cage_finance.tools.trade_executor import execute_trade
+
+        tx_id = str(uuid.uuid4())
+        order = TradeOrder(
+            symbol="TSLA",
+            amount=5,
+            currency="USD",
+            side="short",  # invalid — not in {"buy", "sell"}
+            type="market",
+            confidence=0.80,
+            transaction_id=tx_id,
+        )
+
+        with (
+            patch("src.cage_finance.tools.trade_executor.redis_client") as mock_redis,
+            patch("requests.post") as mock_post,
+            patch.dict(
+                os.environ,
+                {
+                    "BROKER_API_KEY": "test-key",
+                    "BROKER_API_SECRET": "test-secret",
+                    "USE_MOCK_BROKER": "false",
+                },
+            ),
+        ):
+            mock_redis.get.return_value = None
+
+            with pytest.raises(
+                (ValueError, AssertionError), match="Invalid trade side"
+            ):
+                await execute_trade(order, routing_seal="test-seal-c01-invalid")
+
+        # Broker must never be called for an invalid side.
+        mock_post.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_mock_broker_preserves_sell_side(self):
+        """Mock broker fast-path must also reflect the requested side in its return value.
+
+        _USE_MOCK_BROKER is a module-level constant evaluated at import time, so
+        patch.dict(os.environ) cannot change it after the module is loaded.
+        We patch the constant directly on the module instead.
+        """
+        import src.cage_finance.tools.trade_executor as tools_module
+        from src.cage_finance.models.trade_order import TradeOrder
+        from src.cage_finance.tools.trade_executor import execute_trade
+
+        tx_id = str(uuid.uuid4())
+        order = TradeOrder(
+            symbol="NVDA",
+            amount=20,
+            currency="USD",
+            side="sell",
+            type="market",
+            confidence=0.88,
+            transaction_id=tx_id,
+        )
+
+        with (
+            patch("src.cage_finance.tools.trade_executor.redis_client") as mock_redis,
+            patch.object(tools_module, "_USE_MOCK_BROKER", True),
+        ):
+            mock_redis.get.return_value = None
+
+            result = await execute_trade(order, routing_seal="test-seal-c01-mock")
+
+        # The mock result string includes the side from the order object.
+        assert "sell" in result.lower(), (
+            f"Mock broker result should mention 'sell' but got: {result}"
+        )

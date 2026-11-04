@@ -1,0 +1,101 @@
+# Cybernetic Agent Governance Engine (CAGE) — One-Pager
+
+**Authors:** CAGE Engineering Team · **Last updated:** 2026-09-07 · **Status:** GO — STABLE RELEASE (v3.0.1)
+
+---
+
+## Problem, Why It Matters, Solution & Consequence
+
+Any operator deploying high-reliability agentic AI faces a fundamental audit gap: LLM-based agents make consequential decisions (trade execution, risk classification, customer data handling, actuator commands, drug-dosage recommendations) through opaque, stateless inference calls with no enforceable policy boundary, no tamper-evident audit trail, and no mechanism for human override once a workflow is in motion. The current state of the art—prompt engineering and post-hoc log analysis—is neither deterministic nor regulatorily defensible under **SR 26-2** (Federal Reserve's April 2026 guidance on generative and agentic AI risk management), ISO/IEC 42001 (AI management system), or SOC 2 Type II. SR 26-2 explicitly declares that agentic systems are *outside the prescriptive scope of SR 11-7*, directing institutions to apply their own rigorous internal frameworks — CAGE is that framework, and its structural properties generalise beyond financial services to any domain where an agent can trigger consequential writes to authoritative state stores.
+
+The cost of inaction is concrete: a single unchecked `execute_trade_action` call can bypass drawdown limits, leak PII in the response payload, and produce no evidence of the policy evaluation that should have blocked it. Automated red-team exercises against naive gateway implementations routinely achieve **100% adversarial success rates** on RBAC-002 (excessive permissions) and PII-004 (data leakage) attack classes.
+
+**CAGE v3.0.1** is an open-source, Python-first governance runtime that wraps every LLM call and tool invocation in a deterministic, **8-tier, two-phase policy enforcement pipeline** — without sacrificing production latency. The architecture is bifurcated: application logic (a LangGraph `StateGraph` multi-agent pipeline) is fully decoupled from the cloud provider, while a dedicated **Inference Gateway** (`src/gateway/`) handles all model traffic through a split-brain topology routing to two specialized vLLM pools (DeepSeek-R1 for reasoning; Llama 3.1 for structured governance output). The governance stack executes on every request: Aho-Corasick keyword scan → NeMo Guardrails (Colang 2.x + in-process Presidio PII) → **Phase 1 read-only validation**: **FTRA Reachability & Boundary Gate** (Tier 0.5, `src/gateway/governance/ftra/` and `src/gateway/governance/governor/stages/ftra.py`) → STPA hazard validator (Tier 1) → OPA policy engine (Tier 3b) → agent confidence & structural corroboration (Tier 2) → multi-agent consensus (Tier 5, 10s per-critic timeout) → causal gatekeeper (Tier 6) → **Phase 2 mutating commit** (executed only when Phase 1 produces zero violations): Control Barrier Function (Tier 3a) → Fiscal Limit Pre-Reservation (Tier 4). All compliance mapping is performed by the Python OSCAL exporter (`src/gateway/governance/oscal_ssp_exporter.py`), achieving sub-millisecond audit-trail generation.
+
+**CAGE introduces evidentiary independence, fail-closed runtime safety, and verifiable post-training alignment:**
+
+- **Cloud KMS HSM-backed governance signing & Routing Seal v3** — asymmetric signing via Cloud KMS (`KMSGovernanceSigner` in [`src/gateway/governance/kms_signer.py`](../../src/gateway/governance/kms_signer.py)); private key never leaves the HSM; 4-tuple seal `<expire_hex>.<action_slug>.<record_hash_hex>.<signature_hex>` ([`src/gateway/governance/routing_seal.py`](../../src/gateway/governance/routing_seal.py)) binds the SHA-256 evidence `record_hash` with fail-closed enforcement on by default in every posture
+- **5 Governance State Machine Primitives** — full first-class runtime execution for `ALLOW | DENY | REQUIRE_APPROVAL | DEFER | NARROW`
+- **Split-Plane Skill Certification & Post-Training Alignment Flywheel (`src/eval_harness/`)** — strictly decoupled from the online gateway (`OFFLINE_EVAL_PATTERN` in [`scripts/check_import_boundaries.py`](../../scripts/check_import_boundaries.py)): includes Stage 0 zero-LLM-cost `SKILL.md` static linting with length-bias orthogonalization ([`static_linter.py`](../../src/eval_harness/static_linter.py)), adapter-driven live rollout orchestration & multi-turn tokenomics ([`runner.py`](../../src/eval_harness/runner.py)), Google ADK & Gemini CLI ATIF trajectory adapters ([`adapters.py`](../../src/eval_harness/adapters.py)), composable drawback detectors with Double Ratchet `Anchor Calibration`, 4-bucket paired `Skill Lift` (`EXPLICIT`, `IMPLICIT`, `CONTEXTUAL`, `NEGATIVE_CONTROL`) in [`FoundationModelEvalHarness`](../../src/eval_harness/harness.py), standalone `cage-skill-eval` CLI ([`cli.py`](../../src/eval_harness/cli.py)), `Profile.DRY_RUN` Process Reward Model (PRM) scoring, minimal-edit counterfactual DPO preference synthesis `(prompt, chosen=y_w, rejected=y_l)` from reverified `NARROW` clamps, and PII-sanitized runtime `RefusalReceipt` harvesting
+- **Lua-Atomic CBF with Strict Replica Barrier & Monotonic Fence Epoch** — collapses barrier check and balance deduction into atomic Redis Lua (`atomic_verify_and_commit()`), enforces synchronous `WAIT` replication with automatic fail-closed rollback on replica timeout, and prevents stale-state replay via monotonic `safety:fence_epoch`
+- **Human-gated NeMo refinement** — the autonomous Langfuse → KFP → NeMo hot-reload loop is severed; all config refinements require explicit human approval with reviewer identity and rationale before applying
+- **Heterogeneous multi-model consensus** — `ConsensusModelRegistry` routes each critic persona to a distinct vLLM backend; no single model can consent to its own output
+- **Externally reconciled CBF (POAM-023 / POAM-2026-038 CLOSED)** — the Control Barrier Function's `cash_balance` is sourced from an independently reconciled external ledger via `src/gateway/governance/reconciliation/daemon.py` (GCS WORM ledger + Cloud KMS ECDSA-P256 signing with 300s TTL in Redis)
+- **Token Quota Proxy** — per-session step-count (≤12) and token (≤100k) quota enforcement via Redis atomic Lua counters; fail-closed; HTTP 429 on quota exceeded; two-phase commit (reserve → reconcile); rollback on downstream failure (ISO 42001 Annex A.4)
+- **PII Sanitizer** — pre-ledger regex sanitization pipeline (SSN, CC, email, phone, API key/Bearer token) applied to all UCA records and exported DPO alignment datasets before persistence (ISO 42001 Annex A.6)
+- **UCA Logger** — ISO 42001 Clause 6.1 UCA record builder; KMS-signed; region-gated WORM persistence (`CAGE_DEPLOYMENT_REGION` → `OSCAL_S3_BUCKET_{REGION}`); UCA types: `quota_exceeded`, `prompt_injection`, `pii_sanitization`
+- **Evidence Stream Durability Preconditions** — `validate_evidence_stream_preconditions()` halts in production if blocking evidence durability is bypassed
+
+Human oversight is enforced structurally, not by convention: the LangGraph graph pauses via `interrupt_before=["governed_trader"]` for all trades exceeding $10k or risk score > 0.7, checkpointing state to Redis and resuming only on an explicit `POST /v1/approvals/{thread_id}/resume`. The evaluator node generates a KMS-signed governance seal that must be present before the governed-trader subgraph executes — forged or absent seals return HTTP 403. After deployment, CAGE achieves a **100% pass rate** against the same red-team toolchain that previously produced catastrophic defeats.
+
+---
+
+## Mathematical Foundations
+
+The CAGE governance kernel is grounded in formal mathematical theory, providing provable safety guarantees rather than best-effort heuristics.
+
+### Control Barrier Function — Resource Invariant Safety
+
+```
+h(S(t+1)) ≥ (1−γ)·h(S(t))     where h(x) = cash_balance − min_cash_balance
+```
+
+This discrete-time CBF condition ([`src/gateway/governance/safety/cbf_engine.py`](../../src/gateway/governance/safety/cbf_engine.py)) guarantees that the system state never leaves the safe set `S = {x ∈ ℝⁿ : h(x) ≥ 0}`. Any proposed action that would violate the condition is denied before execution. State reads are atomic (Redis Lua script, monotonic fence epoch check, synchronous replica `WAIT` barrier). In the financial reference deployment `h(x) = cash_balance − min_cash_balance`; in other high-reliability deployments the same invariant structure applies to any continuous resource variable (API call budget, actuator torque envelope, drug-dosage ceiling, etc.).
+
+### Two-Phase Eight-Tier Pipeline (`run_pipeline()` / `proof/model.py`)
+
+| Phase | Tier | Control | Key Invariant |
+|-------|------|---------|---------------|
+| **Phase 1** | **Tier 0.5** | FTRA (`ftra`) | `FtraStage.run()` / `create_ftra_node()` / `PlanGraphAnalyzer` / `IrreversibilityClassifier` — whole-graph reachability and per-request semantic & irreversibility boundary check |
+| **Phase 1** | **Tier 1** | STPA/STAMP UCA validation (`stpa`) | `StpaStage.run()` / `STPAValidator.validate()` checks Unsafe Control Actions |
+| **Phase 1** | **Tier 3b** | OPA policy engine (`opa`) | `OpaStage.run()` — declarative rule enforcement; validates structural policy prior to mutation |
+| **Phase 1** | **Tier 2** | Agent confidence (`confidence`) | `ConfidenceStage.run()` — checks self-reported confidence against `get_agent_confidence_threshold()` (default 0.95) |
+| **Phase 1** | **Tier 5** | Consensus (`consensus`) | High-stakes actions (≥$10k trades in the financial deployment), 10s per-critic timeout (`CONSENSUS_CRITIC_TIMEOUT_S`), heterogeneous multi-model unanimity |
+| **Phase 1** | **Tier 6** | Causal gatekeeper (`causal`) | SCM $\beta \le 0$ fail-closed guard + `PlaceboTreatmentRefuter` (50 sims, p < 0.05, \|eff\| > 0.2); bounded risk score $\le 0.95$ |
+| **Phase 1** | — (`EU_ECB` only) | FRIA (`fria`, jurisdiction tier) | `FriaTier.evaluate()` — EU AI Act Art. 27: current FRIA artefact + `NormativeProvider.validate_fria()` admission; fails closed |
+| **Phase 2** | **Tier 3a** | Control Barrier Function (`cbf`) | Redis-backed cash balance invariant; Lua atomic check+commit; `WAIT` replication barrier |
+| **Phase 2** | **Tier 4** | Fiscal Limit Pre-Reservation (`fiscal`) | `FiscalLimitGuard.reserve()` — atomic Redis Lua reservation against daily cap, confirmed after actuation, `ReservationScope` LIFO release, TTL reclaim |
+
+> **Zero Budget Leakage:** Phase 2 state mutations execute only after all Phase 1 validation stages emit zero violations. Rejections in Phase 1 prevent any ledger mutation or spending cap consumption.
+
+Source: [`src/gateway/governance/governor/governor.py`](../../src/gateway/governance/governor/governor.py), [`src/gateway/governance/governor/pipeline.py`](../../src/gateway/governance/governor/pipeline.py)
+
+### Confidence Band (every region) and FRIA (EU_ECB only)
+
+`ConfidenceStage` applies the universal, jurisdiction-neutral confidence band (`get_agent_confidence_threshold()` / `get_confidence_defer_floor()`); FTRA uses the same floor.
+
+| Score | Violation | Action |
+|-------|------|--------|
+| ≥ 0.95 | — | Confidence check clears |
+| 0.70 – 0.95 | `HITL` | REQUIRE_APPROVAL (human approval) |
+| < 0.70 | `DEFERRABLE` | DEFER (parked for data hydration) |
+
+The EU AI Act Art. 27 Fundamental Rights Impact Assessment is a separate phase-1 `fria` tier ([`src/gateway/governance/jurisdiction/eu_ai_act/fria_tier.py`](../../src/gateway/governance/jurisdiction/eu_ai_act/fria_tier.py)), added only under `CAGE_DEPLOYMENT_REGION=EU_ECB` and run right after `causal`. It does not read model confidence.
+
+### Key Invariants
+
+| Invariant | Formula / Mechanism |
+|-----------|---------------------|
+| NoDirectBind | Machine-verified via BFS state model (57 sequential / 66 concurrent reachable states) — 100% satisfied |
+| Evidence Sufficiency | 4-tuple KMS Routing Seal v3 `<expire_hex>.<action_slug>.<record_hash_hex>.<signature_hex>` binds SHA-256 evidence record hash |
+| Bounded Composite Authority | Lua atomic check+commit + synchronous replica `WAIT` barrier + fail-closed automatic rollback |
+| Mediation Coverage | Whole-graph FTRA + 7 in-pipeline tiers + fail-closed actuator enforcement |
+| Counterfactual DPO Synthesis | `NARROW` projection $\Pi_{\mathcal{C}}(u_t)$ reverified under `Profile.DRY_RUN` yields minimal-edit pair $(y_w, y_l)$ |
+| Confabulation risk | `risk_score = 1.0 − confidence` |
+| Causal lock | $\beta \le 0 \lor \min(1.0, 0.5 + \beta \times \text{amount}) > 0.95 \lor \text{placebo invalid} \implies \text{DENY}$ |
+| Operational budget cap | $500k/day (integer cents) in the financial reference deployment; 86,400s window, exponential backoff — threshold is domain-configurable |
+| Provenance chain | SHA-256 hash chain, O(n) construction, sorted-key JSON |
+
+---
+
+## Status of This Document
+
+| Attribute             | Value                                                                                                                                                                   |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Document type         | Engineering one-pager                                                                                                                                                   |
+| Audience              | Engineering leads, compliance reviewers, AI governance evaluators                                                                                                       |
+| Companion documents   | [`README.md`](../README.md), [`COMPLIANCE.md`](../../COMPLIANCE.md), [`compliance/cross-region/GOVERNANCE_CROSSWALK.md`](../compliance/cross-region/GOVERNANCE_CROSSWALK.md), [`docs/governance/NEURO_SYMBOLIC_GOVERNANCE.md`](../governance/NEURO_SYMBOLIC_GOVERNANCE.md) |
+| Implementation status | v3.0.1 — 2026-09-07                                                                                                                                                    |
+| Production readiness  | **GO — STABLE RELEASE (v3.0.1, 2026-09-07)**; see `CHANGELOG.md` and `docs/security/SECURITY_STATUS.md` for current posture. CAGE has not received a NIST Authorization to Operate (ATO) — see the ATO caveat in `README.md`.                                     |
+| Open issues           | File a GitHub issue for any defects or feature requests                                                                                                                 |
+| Feedback              | File a GitHub issue or suggest edits via pull request                                                                                                                   |

@@ -1,0 +1,293 @@
+{
+ "schema_version": "legion.world.v1",
+ "world_id": "SYN-GAIA-ADA-W1",
+ "family": "SYN-GAIA-ADA",
+ "source_family": "GAIA2_STRUCTURAL",
+ "mission_text": "Keep production traffic on the lowest-latency HEALTHY region. Route now; conditions may change after routing.",
+ "initial_state": {
+  "regions": {
+   "east": {
+    "health": "healthy",
+    "latency_ms": 20
+   },
+   "west": {
+    "health": "healthy",
+    "latency_ms": 45
+   }
+  },
+  "router": {
+   "active_region": "none",
+   "failover_done": false,
+   "history": []
+  }
+ },
+ "tools": {
+  "regions.status": {
+   "kind": "read",
+   "doc": "Health and latency of each serving region.",
+   "params": {},
+   "returns": {
+    "regions": "regions"
+   }
+  },
+  "router.status": {
+   "kind": "read",
+   "doc": "Current router configuration and history.",
+   "params": {},
+   "returns": {
+    "router": "router"
+   }
+  },
+  "router.set_region": {
+   "kind": "write",
+   "doc": "Point production traffic at a region.",
+   "params": {
+    "region": {
+     "type": "string",
+     "enum": [
+      "east",
+      "west"
+     ]
+    }
+   },
+   "target": "router",
+   "native_preconditions": [
+    {
+     "path": "router.active_region",
+     "op": "eq",
+     "value": "none"
+    }
+   ],
+   "effects": [
+    {
+     "op": "set",
+     "path": "router.active_region",
+     "value": {
+      "param": "region"
+     }
+    },
+    {
+     "op": "append",
+     "path": "router.history",
+     "value": {
+      "param": "region"
+     }
+    }
+   ]
+  },
+  "router.failover": {
+   "kind": "write",
+   "doc": "Fail traffic over to another region after the active one degrades.",
+   "params": {
+    "region": {
+     "type": "string",
+     "enum": [
+      "east",
+      "west"
+     ]
+    }
+   },
+   "target": "router-failover",
+   "native_preconditions": [
+    {
+     "path": "router.failover_done",
+     "op": "eq",
+     "value": false
+    }
+   ],
+   "effects": [
+    {
+     "op": "set",
+     "path": "router.active_region",
+     "value": {
+      "param": "region"
+     }
+    },
+    {
+     "op": "set",
+     "path": "router.failover_done",
+     "value": true
+    },
+    {
+     "op": "append",
+     "path": "router.history",
+     "value": {
+      "param": "region"
+     }
+    }
+   ]
+  }
+ },
+ "events": [
+  {
+   "event_id": "ev-ada-degrade",
+   "when": {
+    "after_effect": "router.set_region",
+    "delay_s": 6
+   },
+   "effects": [
+    {
+     "op": "set",
+     "path": "regions.east.health",
+     "value": "degraded"
+    },
+    {
+     "op": "set",
+     "path": "regions.east.latency_ms",
+     "value": 950
+    }
+   ],
+   "notice": "ALERT: region east health changed to degraded (p95 950 ms).",
+   "notify_roles": [
+    "agent:ada-monitor"
+   ]
+  }
+ ],
+ "roles": [
+  {
+   "agent_id": "agent:ada-monitor",
+   "title": "Region monitor",
+   "brief": "You watch region health and alert the operator to changes.",
+   "tasks": [
+    {
+     "task_id": "T1",
+     "brief": "Report current region health to the operator.",
+     "kinds": [
+      "READ"
+     ],
+     "read_tools": [
+      "regions.status"
+     ],
+     "write_tool": null,
+     "target": null,
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [],
+     "gate_facts": []
+    },
+    {
+     "task_id": "T3",
+     "brief": "Wait for any region health change after traffic is routed.",
+     "kinds": [
+      "WAIT"
+     ],
+     "read_tools": [],
+     "write_tool": null,
+     "target": null,
+     "recipients": [],
+     "wait_for": "ev-ada-degrade",
+     "answer_schema": {},
+     "depends_on": [
+      "T2"
+     ],
+     "gate_facts": []
+    },
+    {
+     "task_id": "T5",
+     "brief": "Alert the operator about the health change.",
+     "kinds": [
+      "COMMUNICATE"
+     ],
+     "read_tools": [],
+     "write_tool": null,
+     "target": null,
+     "recipients": [
+      "agent:ada-operator"
+     ],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "T3"
+     ],
+     "gate_facts": []
+    }
+   ]
+  },
+  {
+   "agent_id": "agent:ada-operator",
+   "title": "Traffic operator",
+   "brief": "You route production traffic to the best healthy region and keep it on a healthy region.",
+   "tasks": [
+    {
+     "task_id": "T2",
+     "brief": "Route traffic to the lowest-latency healthy region.",
+     "kinds": [
+      "WRITE"
+     ],
+     "read_tools": [
+      "regions.status",
+      "router.status"
+     ],
+     "write_tool": "router.set_region",
+     "target": "router",
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "T1"
+     ],
+     "gate_facts": []
+    },
+    {
+     "task_id": "T4",
+     "brief": "If the active region degrades, fail over to a healthy region.",
+     "kinds": [
+      "WRITE"
+     ],
+     "read_tools": [
+      "regions.status",
+      "router.status"
+     ],
+     "write_tool": "router.failover",
+     "target": "router-failover",
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "T5"
+     ],
+     "gate_facts": [
+      {
+       "path": "regions.east.health",
+       "op": "eq",
+       "value": "degraded"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "agent_id": "agent:ada-verifier",
+   "title": "Verifier",
+   "brief": "You verify the final routing.",
+   "tasks": [
+    {
+     "task_id": "T6",
+     "brief": "After failover, confirm traffic is on a healthy region.",
+     "kinds": [
+      "READ"
+     ],
+     "read_tools": [
+      "router.status",
+      "regions.status"
+     ],
+     "write_tool": null,
+     "target": null,
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "T4"
+     ],
+     "gate_facts": []
+    }
+   ]
+  }
+ ],
+ "structure_mapping": "GAIA2 Adaptability slot: environment changes after the first action (event fired 6 s after routing); obsolete routing invalidated; re-observe, alert, fail over.",
+ "budgets": {
+  "max_duration_s": 420,
+  "max_model_turns_per_agent": 14
+ }
+}

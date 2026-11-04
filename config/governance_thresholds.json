@@ -1,0 +1,147 @@
+{
+  "_comment": "CAGE Governance Thresholds — single source of truth. Loaded and Pydantic-validated at gateway startup. All modules MUST reference the loaded singleton; never inline literals.",
+  "_schema_version": "3.0.0",
+  "_env_override_comment": "All thresholds support env var overrides for runtime tuning; the map lives in src/gateway/governance/schemas/thresholds.py (_ENV_OVERRIDES), e.g. confidence.defer_floor -> CONFIDENCE_DEFER_FLOOR.",
+  "confidence": {
+    "agent_threshold": 0.95,
+    "_comment_agent": "[EV-2] ALLOW floor of the universal confidence band (every region): at or above it the confidence check clears. Env override: AGENT_CONFIDENCE_THRESHOLD.",
+    "defer_floor": 0.70,
+    "_comment_defer_floor": "[EV-1] Lower edge of the HITL zone: confidence in [defer_floor, agent_threshold) needs human approval, below defer_floor the request defers. Not a Fundamental Rights Impact Assessment (that is the EU_ECB-only fria tier). Env override: CONFIDENCE_DEFER_FLOOR.",
+    "min_score": 0.95,
+    "_comment_min_score": "[EV-5] Minimum confidence threshold for confabulation scorer — below this value, requests are blocked due to confabulation risk. Consolidated from CONFIDENCE_MIN_SCORE env var. Production deployments may override via secretKeyRef."
+  },
+  "causal": {
+    "p_value_threshold": 0.05,
+    "_comment_pvalue": "Standard frequentist significance level for causal lock decisions. Consistent with SR 26-2 MRM back-testing requirements (CTRL_TEL_003).",
+    "placebo_effect_magnitude": 0.2,
+    "_comment_placebo": "If absolute placebo refuter new_effect exceeds this, estimated causal effect is unreliable. 0.2 corresponds to Cohen's d ≈ 0.2 (medium effect).",
+    "risk_boundary": 0.95,
+    "_comment_risk": "If (0.5 + estimated_marginal_effect) exceeds this, trade is predicted to push risk above safety boundary. Leaves 5% safety margin.",
+    "min_samples": 50,
+    "_comment_samples": "[EV-4] Consolidated from CAUSAL_MIN_SAMPLES and CAUSAL_MIN_LIVE_SAMPLES. Minimum telemetry samples required for causal model training."
+  },
+  "telemetry": {
+    "max_staleness_seconds": 300,
+    "_comment_staleness": "[EV-6] Maximum age of telemetry observation (seconds) before data is treated as stale and causal gatekeeper fails closed. Env override: TELEMETRY_MAX_STALENESS_SECONDS.",
+    "cache_ttl_seconds": 60,
+    "_comment_cache": "[EV-6] TTL for Redis-backed causal result cache (seconds). Set to 0 to disable caching. Env override: CAUSAL_CACHE_TTL_SECONDS."
+  },
+  "kms_batch": {
+    "max_size": 10,
+    "_comment_max_size": "[EV-5] Maximum records per KMS batch signing operation. Env override: KMS_BATCH_MAX_SIZE.",
+    "enabled": false,
+    "_comment_enabled": "[EV-5] KMS batch signing disabled by default for safety. Enable explicitly in production. Env override: KMS_BATCH_ENABLED."
+  },
+  "reconciliation": {
+    "discrepancy_ratio": 0.5,
+    "_comment_ratio": "[EV-7] Relative discrepancy guard for the ground-truth reconciler: a custodian snapshot whose delta from the self-reported baseline exceeds max(ratio * |baseline|, abs_floor) is rejected, the fence epoch is incremented and the verified state is invalidated. Env override: RECONCILIATION_DISCREPANCY_RATIO.",
+    "discrepancy_abs_floor": 100.0,
+    "_comment_abs_floor": "[EV-7] Absolute floor (invariant units) under which a delta is never a discrepancy, so small balances are not refused for ordinary movements. POAM-2026-087 / ADR-010. Env override: RECONCILIATION_DISCREPANCY_ABS_FLOOR.",
+    "settlement_lag_seconds": 120.0,
+    "_comment_lag": "[EV-7] Fallback settlement window when the custodian does not attest settled_through: local debits newer than verified_at - lag stay outstanding. Env override: RECONCILIATION_SETTLEMENT_LAG_SECONDS.",
+    "settlement_clock_skew_seconds": 5.0,
+    "_comment_skew": "[EV-7] Clock-skew margin subtracted from every settlement cutoff before local debits are settled. Confirmed debits are stamped after execution, so it covers clock skew only. Env override: RECONCILIATION_SETTLEMENT_CLOCK_SKEW_SECONDS.",
+    "pending_debit_max_age_seconds": 600.0,
+    "_comment_pending": "[EV-7] Unconfirmed debits older than this are promoted to confirmed (stamped at promotion) because they may have executed. Must be >= the governor settlement hold (DEFAULT_HOLD_SECONDS). Env override: RECONCILIATION_PENDING_DEBIT_MAX_AGE_SECONDS."
+  },
+  "warrant": {
+    "max_age_seconds": 60,
+    "_comment_max_age": "[EV-8] Warrant Contract v0.1 Q2 freshness window: CAGE relies on a warrant state for at most this many seconds after it received it, then re-fetches; a failed or timed-out re-fetch makes the state STALE (INELIGIBLE_STALE -> DEFER). Validated 0 < value <= 60. Env override: WARRANT_MAX_AGE_SECONDS.",
+    "fetch_timeout_seconds": 2.0,
+    "_comment_fetch_timeout": "[EV-8] Upper bound on one warrant fetch; an unanswered fetch is ineligible. Must be shorter than max_age_seconds. Env override: WARRANT_FETCH_TIMEOUT_SECONDS."
+  },
+  "domains": {
+    "finance": {
+      "cbf": {
+        "min_cash_balance": 1000.0,
+        "gamma": 0.5
+      },
+      "drawdown": {
+        "limit": 0.05,
+        "_comment": "Maximum allowable portfolio drawdown as a fraction (0.0–1.0). Maps to safety_params.json drawdown_limit."
+      },
+      "stpa": {
+        "uca5_drawdown_threshold_pct": 4.5,
+        "_comment": "UCA-5: drawdown > this value triggers Unsafe Control Action block.",
+        "uca6_max_order_volume_fraction": 0.01,
+        "_comment_uca6": "UCA-6: order_size > daily_vol * this fraction triggers slippage violation.",
+        "max_sell_portfolio_fraction": 0.1,
+        "_comment_fin1": "FIN-1: maximum fraction of portfolio_total that can be sold in one order.",
+        "max_latency_ms": 200.0,
+        "_comment_fin2": "FIN-2: maximum permissible round-trip latency for a trade action."
+      },
+      "consensus": {
+        "threshold_usd": 10000.0,
+        "_comment": "Trades above this USD amount trigger the multi-agent consensus check."
+      },
+      "confidence": {
+        "min_trade_confidence": {
+          "value": 0.95,
+          "requires_warrant": false
+        },
+        "_comment": "[CTRL_AGT_001] Floor on agent confidence for trade execution, enforced by the finance trade_confidence tier (src/cage_finance/tiers/trade_confidence_tier.py) with the universal band semantics: below it, HITL at or above confidence.defer_floor, DEFERRABLE below. Regions raise it in config/thresholds/{REGION}_BASELINE.json (domains.finance.confidence). Distinct from the region-neutral confidence.agent_threshold. requires_warrant (regional decision) makes reliance on the floor conditional on a verified institutional warrant fetched from the configured warrant source (CAGE_WARRANT_SOURCE) and gated by the kernel warrant stage; governing_version is required with it and names the version the warrant must be issued for. Changing a warranted value requires a new governing_version and a re-issued warrant."
+      },
+      "bounding": {
+        "_comment": "Phase 5: Bounding contracts B1–B10 for execute_trade_bounded verb. All contracts enabled by default for reference architecture demonstration. Production deployments should tune thresholds per risk appetite.",
+        "enabled_contracts": ["B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9", "B10"],
+        "max_single_order_usd": 50000.0,
+        "_comment_b1": "B1 — Maximum single-order notional value (USD). HARD_BLOCK severity.",
+        "min_liquidity_depth_ratio": 10.0,
+        "_comment_b3": "B3 — Minimum liquidity depth ratio (order_book_depth_usd / trade_amount). HITL_ESCALATE severity. Larger ratio = deeper liquidity.",
+        "max_volatility_percentile": 75.0,
+        "volatility_window_days": 30,
+        "_comment_b5": "B5 — Maximum volatility percentile (0–100). HITL_ESCALATE severity. Lower value = stricter sizing in volatile markets. Window defaults to 30 days.",
+        "max_twap_slippage_bps": 50.0,
+        "twap_window_seconds": 300,
+        "_comment_b8": "B8 — Maximum TWAP slippage in basis points (1 bps = 0.01%). HITL_ESCALATE severity. 50 bps = 0.5% max slippage. Window defaults to 300 seconds.",
+        "b10_min_rollback_window_seconds": 60,
+        "_comment_b10": "B10 — Minimum rollback window (seconds). Must be >= 60s to justify EXTERNALLY_REVERSIBLE classification. A closed rollback window is a HITL violation (B10_ROLLBACK_WINDOW_CLOSED): the request parks for human approval. A missing or invalid threshold is HARD_BLOCK."
+      }
+    },
+    "healthcare": {
+      "min_therapeutic_concentration": 5.0,
+      "_comment": "Minimum therapeutic serum concentration (mg/L) for dose barrier CBF validation."
+    },
+    "physical_ai": {
+      "min_separation_distance_mm": 500.0,
+      "max_velocity_mm_s": 250.0,
+      "max_joint_torque_nm": 50.0,
+      "_comment": "REFERENCE-ONLY placeholders for the physical-AI CBF barriers. 500 mm echoes the ISO 13855 minimum-distance floor; 250 mm/s is the ISO 10218-1 reduced-speed limit; 50 N·m is illustrative. Adopters must derive real limits from a cell-specific ISO/TS 15066 risk assessment."
+    }
+  },
+  "tier1_keywords": [
+    "SYSTEM OVERRIDE",
+    "IGNORE PREVIOUS INSTRUCTIONS",
+    "DISABLE GUARDRAILS",
+    "DISABLE SAFETY",
+    "ENTER DEBUG MODE",
+    "ENTER ADMIN MODE",
+    "ENTER SUDO MODE",
+    "YOU ARE NOW FREE",
+    "YOU ARE NOW UNFILTERED",
+    "ROOT-ACCESS",
+    "BYPASS-ALL-LIMITS",
+    "ADMIN-9999",
+    "ROOT-ACCESS-2026",
+    "ACT AS A DEVELOPER WITH ROOT ACCESS"
+  ],
+  "_comment_cbrn": "AI 600-1 §2.6 CBRN keyword list — US_FED only. Enabled when tier1_keywords_cbrn_enabled=true.",
+  "tier1_keywords_cbrn": [
+    "synthesize nerve agent",
+    "weaponize pathogen",
+    "enrich uranium",
+    "dirty bomb",
+    "ricin synthesis",
+    "VX precursor",
+    "sarin production",
+    "anthrax spore",
+    "smallpox culture",
+    "radiological dispersal",
+    "biological weapon",
+    "chemical weapon synthesis",
+    "nuclear device construction",
+    "improvised explosive device",
+    "CBRN attack"
+  ],
+  "tier1_keywords_cbrn_enabled": true
+}

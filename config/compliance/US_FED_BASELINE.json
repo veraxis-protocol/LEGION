@@ -1,0 +1,112 @@
+{
+  "agentic_scope_statement": {
+    "internal_id": "DOC-SCOPE-001",
+    "primary_framework": "SR 26-2 §3.1",
+    "co_frameworks": [
+      "AI 600-1 §2.5",
+      "NIST AI RMF GOVERN-1.1",
+      "ISO 42001 §A.2.2"
+    ],
+    "legacy_citation": "SR 26-2 §III.A",
+    "scope": "agentic",
+    "description": "Reference to the agentic scope statement document (docs/AGENTIC_SCOPE_STATEMENT.md) that declares the authorized action space, HITL boundaries, and inter-agent trust model. Required under SR 26-2 §3.1 and AI 600-1 §2.5 before any agentic system may be deployed in a regulated environment."
+  },
+  "_baseline_type": "additive_regional_layer",
+  "_global_baseline": "ISO_42001",
+  "_region": "US_FED",
+  "_activation": "CAGE_DEPLOYMENT_REGION=US_FED",
+  "_comment": "US Federal Reserve / OCC / FDIC regional control-mapping profile. SR 26-2 is the active primary framework for traditional model risk. Agentic controls governed under ISO 42001 per SR 26-2 Footnote 3 (novelty exclusion). To activate: set CAGE_DEPLOYMENT_REGION=US_FED",
+  "_schema_version": "1.1.0",
+  "_jurisdiction": "United States",
+  "_primary_prudential_authority": "Federal Reserve / OCC / FDIC (Joint Agency)",
+  "_references": [
+    "SR 26-2 (Model Risk Management for Agentic AI Systems)",
+    "SR 11-7 (Guidance on Model Risk Management, legacy baseline)",
+    "ISO/IEC 42001:2023 (AI Management System Standard)",
+    "NIST AI RMF 1.0",
+    "NIST SP 800-53 Rev 5"
+  ],
+  "CTRL_AGT_001": {
+    "internal_id": "THR-CONF-001",
+    "primary_framework": "ISO 42001 §A.5.2",
+    "co_frameworks": [
+      "DORA Art. 11 – ICT Risk Management",
+      "NIST AI RMF GOVERN-5"
+    ],
+    "legacy_citation": "SR 26-2 §IV.B",
+    "scope": "agentic",
+    "description": "Minimum agentic model confidence required to execute a trade. Agentic AI is explicitly excluded from SR 26-2 MRM scope (Footnote 3); governed here under ISO 42001 Operational Risk."
+  },
+  "CTRL_WAL_002": {
+    "internal_id": "THR-WAL-002",
+    "primary_framework": "ISO 42001 §A.8.4",
+    "co_frameworks": [
+      "DORA Art. 12 – Backup and Recovery",
+      "NIST SP 800-53 CP-10"
+    ],
+    "legacy_citation": "SR 26-2 Non-Determinism Containment",
+    "scope": "agentic",
+    "description": "Atomic transaction guarantee via Write-Ahead Log and LIFO rollback. MCP tool invocations in forward WAL nodes must be provably atomic in production, not merely declared in policy documents."
+  },
+  "CTRL_TEL_003": {
+    "internal_id": "THR-TEL-003",
+    "primary_framework": "ISO 42001 §A.9.4",
+    "co_frameworks": [
+      "DORA Art. 10 – ICT-Related Incident Detection and Monitoring",
+      "NIST AI RMF MEASURE-2.6"
+    ],
+    "legacy_citation": "SR 26-2 World-Model Validation",
+    "scope": "agentic",
+    "description": "World-model validation must reflect live runtime telemetry, not synthetic data. DoWhy causal gatekeeper placebo refutation must be sourced from live Langfuse governance spans."
+  },
+  "CTRL_MRM_004": {
+    "internal_id": "THR-MRM-004",
+    "primary_framework": "SR 26-2 §IV – Model Risk Management",
+    "co_frameworks": [
+      "SR 11-7 (legacy baseline, superseded by SR 26-2 for agentic components)"
+    ],
+    "legacy_citation": "SR 11-7",
+    "scope": "traditional_ml",
+    "description": "Traditional quantitative model validation criteria applicable to non-agentic, deterministic ML components (e.g. CBF predictor, DoWhy causal model coefficients). SR 26-2 explicitly retains MRM scope for these components."
+  },
+  "CTRL_OPA_005": {
+    "internal_id": "THR-OPA-005",
+    "primary_framework": "ISO 42001 §A.6.1",
+    "co_frameworks": [
+      "NIST SP 800-53 AC-3",
+      "NIST AI RMF GOVERN-6"
+    ],
+    "legacy_citation": "ISO 42001 OPA Policy Enforcement",
+    "scope": "agentic",
+    "description": "OPA policy evaluation must ALLOW before any agentic action is executed. DENY or MANUAL_REVIEW outcomes constitute a policy violation and must surface as GovernanceError."
+  },
+  "CTRL_TQP_007": {
+    "internal_id": "THR-TQP-007",
+    "primary_framework": "ISO 42001 §A.4 – Resource Management",
+    "co_frameworks": [
+      "ISO 42001 §6.1 – STPA Risk Logging",
+      "ISO 42001 §A.6 – Data Lineage and PII Leak Mitigation",
+      "NIST SP 800-53 SC-5 – Denial-of-Service Protection",
+      "NIST AI RMF GOVERN-1.7 – Resource Constraints"
+    ],
+    "legacy_citation": "SR 26-2 §IV.C – Operational Risk Controls for Agentic AI",
+    "scope": "agentic",
+    "enforcement_tier": 2,
+    "worm_bucket_env_var": "OSCAL_S3_BUCKET_US_FED",
+    "description": "Per-session token and step-count quota enforcement via Redis atomic Lua counters. Blocks execution when sequence_step_count > 12 OR accumulated_tokens > 100,000. Fail-CLOSED: Redis unavailable blocks the request. Every blocked execution produces a KMS-signed UCA record persisted to the WORM ledger (ISO 42001 Clause 6.1). Pre-ledger PII sanitization applied per Annex A.6. Primary enforcer: TokenQuotaProxy (Python, Redis Lua). Secondary declarative evidence: OPA quota_within_limits rule (pending runtime injection of session state)."
+  },
+  "CTRL_FTRA_001": {
+    "internal_id": "CTRL_FTRA_001",
+    "primary_framework": "ISO 42001 A.8.4",
+    "co_frameworks": [],
+    "legacy_citation": "ISO 42001 A.8.4",
+    "scope": "agentic",
+    "description": "FTRA reachability gate"
+  },
+  "_hitl": {
+    "citation": "SR 26-2 §IV.D",
+    "sla_hours": 4.0,
+    "pii_retention_authority": "FISMA AU-11",
+    "injection_citation": "AI 600-1 §3.2.1 (input validation and prompt injection defense)"
+  }
+}

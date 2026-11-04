@@ -1,0 +1,169 @@
+# CAGE Client SDK (`cage-client`)
+
+Lightweight Python Policy Enforcement Point (PEP) client for the **Cybernetic AI Governance Engine (CAGE)**. Designed for zero-overhead integration into LangGraph and LangChain agent graphs.
+
+## Features
+
+- **Decoupled PEP/PDP Architecture**: Communicates out-of-process with CAGE Gateways via REST/mTLS.
+- **Fail-Closed Semantics**: Network failures and malformed envelopes automatically block execution.
+- **KMS-Signed Envelopes**: Receives tamper-evident `GovernanceEnvelope` decisions signed by the CAGE Gateway KMS key over Linkerd mTLS.
+- **LangGraph Native Adapter**: Pre-execution node decoration via `@cage_guard`.
+- **W3C Distributed Tracing**: Propagates `traceparent` context across agent-to-gateway hops.
+
+## Installation
+
+### From GitHub Repository
+```bash
+# Direct git installation
+pip install "git+https://github.com/google/cybernetic-agent-governance-engine.git#subdirectory=packages/cage-client"
+
+# With LangGraph support
+pip install "cage-client[langgraph] @ git+https://github.com/google/cybernetic-agent-governance-engine.git#subdirectory=packages/cage-client"
+```
+
+### With `uv`
+```bash
+uv add "git+https://github.com/google/cybernetic-agent-governance-engine.git#subdirectory=packages/cage-client"
+```
+
+## Quick Start
+
+### 1. Programmatic Policy Validation
+
+```python
+import asyncio
+from cage_client import CageClient, PolicyViolationException, DeferralPending
+
+
+async def main():
+    async with CageClient(
+        gateway_url="http://localhost:8080",
+    ) as client:
+        try:
+            envelope = await client.validate_action(
+                action="execute_trade",
+                parameters={"symbol": "AAPL", "amount": 1000.0},
+                agent_id="portfolio-manager",
+            )
+            print("Action approved:", envelope.decision)
+        except PolicyViolationException as exc:
+            print("Action denied:", exc.reason_code, exc.violation_details)
+        except DeferralPending as exc:
+            print("Action deferred for HITL review, ticket:", exc.ticket_id)
+
+
+asyncio.run(main())
+```
+
+### 2. LangGraph Node Pre-Execution Guard
+
+```python
+from cage_client import CageClient
+from cage_client.adapters.langgraph import cage_guard
+
+cage = CageClient(gateway_url="http://localhost:8080")
+
+
+@cage_guard(
+    client=cage,
+    action="execute_trade",
+)
+async def trade_execution_node(state: dict) -> dict:
+    # This node only executes if CAGE Gateway issues an ALLOW decision
+    return {"trade_status": "EXECUTED"}
+```
+
+## Client SDK vs. Node Factories: Which to Use?
+
+CAGE provides two integration patterns for LangGraph applications. Choose based on your deployment model:
+
+| Use Case | Recommended Approach | Dependencies |
+|----------|---------------------|--------------|
+| **Standalone LangGraph app** consuming CAGE as a governance service | ✅ `cage-client` SDK | 66KB package (httpx, pydantic, cryptography) |
+| **Building inside the CAGE monorepo** (e.g., new domain plugin) | Node factories ([`langgraph_harness/`](../../src/gateway/governance/langgraph_harness/)) | Full CAGE repository |
+| **Rapid prototyping** with minimal dependencies | ✅ `cage-client` SDK | Lightweight |
+| **Contributing to CAGE core** or extending the kernel | Node factories | Full monorepo |
+| **Enterprise deployment** with separate governance infrastructure | ✅ `cage-client` SDK | Decoupled PEP/PDP |
+
+### Client SDK (This Package)
+
+**Pros:**
+- Lightweight: 66KB package with 3 dependencies
+- Decoupled: LangGraph app and CAGE services deploy independently
+- Simple: `pip install cage-client[langgraph]` and you're ready
+- Fail-closed: Network errors automatically block execution
+
+**Architecture:**
+```
+Your LangGraph App (pip install cage-client)
+    │
+    └──► @cage_guard decorator ──HTTP/2──► CAGE Gateway :8080
+                                            (separate deployment)
+```
+
+**Example:**
+```python
+from cage_client import CageClient
+from cage_client.adapters.langgraph import cage_guard
+
+cage = CageClient(gateway_url="http://localhost:8080")
+
+
+@cage_guard(client=cage, action="execute_trade")
+async def trade_node(state: dict) -> dict:
+    return {"result": "executed"}
+```
+
+### Node Factories (Advanced)
+
+**Pros:**
+- Direct access to CAGE kernel internals
+- No network hop for in-process governance nodes
+- Full control over tier composition
+
+**Architecture:**
+```
+CAGE Monorepo
+    │
+    └──► src/gateway/governance/langgraph_harness/
+         (embedded in same Python process)
+```
+
+**Example:**
+```python
+from src.gateway.governance.langgraph_harness import create_opa_safety_node
+
+graph.add_node("safety_check", create_opa_safety_node(policy_path="trade_governance"))
+```
+
+**When to use:** You're building a new domain plugin inside `src/cage_yourdomain/` or extending CAGE's kernel.
+
+### Migration Path
+
+If you start with the client SDK and later need direct kernel access, the migration is straightforward:
+
+```python
+# Before (client SDK)
+@cage_guard(client=cage, action="execute_trade")
+async def trade_node(state): ...
+
+
+# After (node factory)
+from src.gateway.governance.langgraph_harness import create_opa_safety_node
+
+graph.add_node("opa_check", create_opa_safety_node(policy_path="trade_governance"))
+```
+
+The decision semantics remain identical (`ALLOW`/`DENY`/`DEFER`).
+
+## Learn More
+
+- **Quick Start Guide:** [`docs/guides/LANGGRAPH_QUICKSTART.md`](../../docs/guides/LANGGRAPH_QUICKSTART.md)
+- **Tutorial Notebook:** [`docs/guides/langgraph_governance_tutorial.ipynb`](../../docs/guides/langgraph_governance_tutorial.ipynb)
+- **LangGraph Harness (Advanced):** [`docs/architecture/EXTENSIBILITY_ARCHITECTURE.md`](../../docs/architecture/EXTENSIBILITY_ARCHITECTURE.md#41-langgraph-harness--governance-node-composition)
+- **Release Notes:** [client-v0.2.0](https://github.com/google/cybernetic-agent-governance-engine/releases/tag/client-v0.2.0)
+
+## License
+
+Apache License 2.0.
+

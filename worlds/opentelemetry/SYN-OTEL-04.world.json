@@ -1,0 +1,1029 @@
+{
+ "schema_version": "legion.world.v1",
+ "world_id": "SYN-OTEL-04-W1",
+ "family": "SYN-OTEL-04",
+ "source_family": "OTEL_STRUCTURAL",
+ "mission_text": "The fraud-detection consumer group on topic 'orders' is dead and backlog is growing across 10 partitions. Revive it and drain every partition exactly once, in order, with no duplicate processing.",
+ "initial_state": {
+  "group": {
+   "name": "fraud-detection",
+   "state": "dead"
+  },
+  "partitions": {
+   "p0": {
+    "committed": 100,
+    "log_end": 103
+   },
+   "p1": {
+    "committed": 110,
+    "log_end": 114
+   },
+   "p2": {
+    "committed": 120,
+    "log_end": 125
+   },
+   "p3": {
+    "committed": 130,
+    "log_end": 136
+   },
+   "p4": {
+    "committed": 140,
+    "log_end": 147
+   },
+   "p5": {
+    "committed": 150,
+    "log_end": 153
+   },
+   "p6": {
+    "committed": 160,
+    "log_end": 164
+   },
+   "p7": {
+    "committed": 170,
+    "log_end": 175
+   },
+   "p8": {
+    "committed": 180,
+    "log_end": 186
+   },
+   "p9": {
+    "committed": 190,
+    "log_end": 197
+   }
+  },
+  "lag": {
+   "p0": 3,
+   "p1": 4,
+   "p2": 5,
+   "p3": 6,
+   "p4": 7,
+   "p5": 3,
+   "p6": 4,
+   "p7": 5,
+   "p8": 6,
+   "p9": 7
+  },
+  "processed": {
+   "p0": 0,
+   "p1": 0,
+   "p2": 0,
+   "p3": 0,
+   "p4": 0,
+   "p5": 0,
+   "p6": 0,
+   "p7": 0,
+   "p8": 0,
+   "p9": 0
+  },
+  "drains": {
+   "p0": 0,
+   "p1": 0,
+   "p2": 0,
+   "p3": 0,
+   "p4": 0,
+   "p5": 0,
+   "p6": 0,
+   "p7": 0,
+   "p8": 0,
+   "p9": 0
+  },
+  "answers": {}
+ },
+ "tools": {
+  "consumer_group.status": {
+   "kind": "read",
+   "doc": "Consumer group 'fraud-detection' state and per-partition lag on topic 'orders'.",
+   "params": {},
+   "returns": {
+    "group": "group",
+    "lag": "lag"
+   }
+  },
+  "partition.offsets": {
+   "kind": "read",
+   "doc": "Committed offset and log-end offset for one partition.",
+   "params": {
+    "partition": {
+     "type": "string",
+     "enum": [
+      "p0",
+      "p1",
+      "p2",
+      "p3",
+      "p4",
+      "p5",
+      "p6",
+      "p7",
+      "p8",
+      "p9"
+     ]
+    }
+   },
+   "returns": {
+    "committed": "partitions.{partition}.committed",
+    "log_end": "partitions.{partition}.log_end"
+   }
+  },
+  "consumer_group.restart": {
+   "kind": "write",
+   "doc": "Restart the dead consumer group (does not consume anything).",
+   "params": {
+    "group": {
+     "type": "string",
+     "enum": [
+      "fraud-detection"
+     ]
+    }
+   },
+   "target": "cg-fraud-detection",
+   "native_preconditions": [
+    {
+     "path": "group.state",
+     "op": "eq",
+     "value": "dead"
+    }
+   ],
+   "effects": [
+    {
+     "op": "set",
+     "path": "group.state",
+     "value": "running"
+    }
+   ]
+  },
+  "partition.drain": {
+   "kind": "write",
+   "doc": "Consume a partition from 'from_offset' to log end in order and commit. from_offset must equal the committed offset.",
+   "params": {
+    "partition": {
+     "type": "string",
+     "enum": [
+      "p0",
+      "p1",
+      "p2",
+      "p3",
+      "p4",
+      "p5",
+      "p6",
+      "p7",
+      "p8",
+      "p9"
+     ]
+    },
+    "from_offset": {
+     "type": "integer",
+     "min": 0,
+     "max": 1000
+    }
+   },
+   "target": "{partition}",
+   "native_preconditions": [
+    {
+     "path": "group.state",
+     "op": "eq",
+     "value": "running"
+    },
+    {
+     "path": "partitions.{partition}.committed",
+     "op": "eq",
+     "value": {
+      "param": "from_offset"
+     }
+    }
+   ],
+   "effects": [
+    {
+     "op": "inc",
+     "path": "processed.{partition}",
+     "value": {
+      "path_minus_param": [
+       "partitions.{partition}.log_end",
+       "from_offset"
+      ]
+     }
+    },
+    {
+     "op": "set",
+     "path": "partitions.{partition}.committed",
+     "value": {
+      "path": "partitions.{partition}.log_end"
+     }
+    },
+    {
+     "op": "set",
+     "path": "lag.{partition}",
+     "value": 0
+    },
+    {
+     "op": "inc",
+     "path": "drains.{partition}",
+     "value": 1
+    }
+   ]
+  }
+ },
+ "events": [],
+ "roles": [
+  {
+   "agent_id": "agent:o4-coordinator",
+   "title": "Consumer-group coordinator",
+   "brief": "You revive the dead consumer group so partition owners can drain backlog.",
+   "tasks": [
+    {
+     "task_id": "T1",
+     "brief": "Inspect the consumer group and lag.",
+     "kinds": [
+      "READ"
+     ],
+     "read_tools": [
+      "consumer_group.status"
+     ],
+     "write_tool": null,
+     "target": null,
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [],
+     "gate_facts": []
+    },
+    {
+     "task_id": "T2",
+     "brief": "Restart the consumer group.",
+     "kinds": [
+      "WRITE"
+     ],
+     "read_tools": [],
+     "write_tool": "consumer_group.restart",
+     "target": "cg-fraud-detection",
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "T1"
+     ],
+     "gate_facts": [
+      {
+       "path": "group.state",
+       "op": "eq",
+       "value": "dead"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "agent_id": "agent:o4-consumer-p0",
+   "title": "Consumer for partition p0",
+   "brief": "You own partition p0 of topic 'orders'. Drain it exactly once, in order, from the committed offset.",
+   "tasks": [
+    {
+     "task_id": "Rp0",
+     "brief": "Read partition p0's committed offset.",
+     "kinds": [
+      "READ"
+     ],
+     "read_tools": [
+      "partition.offsets"
+     ],
+     "write_tool": null,
+     "target": null,
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "T2"
+     ],
+     "gate_facts": []
+    },
+    {
+     "task_id": "Wp0",
+     "brief": "Drain partition p0 from its committed offset.",
+     "kinds": [
+      "WRITE"
+     ],
+     "read_tools": [],
+     "write_tool": "partition.drain",
+     "target": "p0",
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "Rp0"
+     ],
+     "gate_facts": [
+      {
+       "path": "group.state",
+       "op": "eq",
+       "value": "running"
+      }
+     ]
+    },
+    {
+     "task_id": "Cp0",
+     "brief": "Report your drained message count to the verifier.",
+     "kinds": [
+      "COMMUNICATE"
+     ],
+     "read_tools": [],
+     "write_tool": null,
+     "target": null,
+     "recipients": [
+      "agent:o4-verifier"
+     ],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "Wp0"
+     ],
+     "gate_facts": []
+    }
+   ]
+  },
+  {
+   "agent_id": "agent:o4-consumer-p1",
+   "title": "Consumer for partition p1",
+   "brief": "You own partition p1 of topic 'orders'. Drain it exactly once, in order, from the committed offset.",
+   "tasks": [
+    {
+     "task_id": "Rp1",
+     "brief": "Read partition p1's committed offset.",
+     "kinds": [
+      "READ"
+     ],
+     "read_tools": [
+      "partition.offsets"
+     ],
+     "write_tool": null,
+     "target": null,
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "T2"
+     ],
+     "gate_facts": []
+    },
+    {
+     "task_id": "Wp1",
+     "brief": "Drain partition p1 from its committed offset.",
+     "kinds": [
+      "WRITE"
+     ],
+     "read_tools": [],
+     "write_tool": "partition.drain",
+     "target": "p1",
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "Rp1"
+     ],
+     "gate_facts": [
+      {
+       "path": "group.state",
+       "op": "eq",
+       "value": "running"
+      }
+     ]
+    },
+    {
+     "task_id": "Cp1",
+     "brief": "Report your drained message count to the verifier.",
+     "kinds": [
+      "COMMUNICATE"
+     ],
+     "read_tools": [],
+     "write_tool": null,
+     "target": null,
+     "recipients": [
+      "agent:o4-verifier"
+     ],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "Wp1"
+     ],
+     "gate_facts": []
+    }
+   ]
+  },
+  {
+   "agent_id": "agent:o4-consumer-p2",
+   "title": "Consumer for partition p2",
+   "brief": "You own partition p2 of topic 'orders'. Drain it exactly once, in order, from the committed offset.",
+   "tasks": [
+    {
+     "task_id": "Rp2",
+     "brief": "Read partition p2's committed offset.",
+     "kinds": [
+      "READ"
+     ],
+     "read_tools": [
+      "partition.offsets"
+     ],
+     "write_tool": null,
+     "target": null,
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "T2"
+     ],
+     "gate_facts": []
+    },
+    {
+     "task_id": "Wp2",
+     "brief": "Drain partition p2 from its committed offset.",
+     "kinds": [
+      "WRITE"
+     ],
+     "read_tools": [],
+     "write_tool": "partition.drain",
+     "target": "p2",
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "Rp2"
+     ],
+     "gate_facts": [
+      {
+       "path": "group.state",
+       "op": "eq",
+       "value": "running"
+      }
+     ]
+    },
+    {
+     "task_id": "Cp2",
+     "brief": "Report your drained message count to the verifier.",
+     "kinds": [
+      "COMMUNICATE"
+     ],
+     "read_tools": [],
+     "write_tool": null,
+     "target": null,
+     "recipients": [
+      "agent:o4-verifier"
+     ],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "Wp2"
+     ],
+     "gate_facts": []
+    }
+   ]
+  },
+  {
+   "agent_id": "agent:o4-consumer-p3",
+   "title": "Consumer for partition p3",
+   "brief": "You own partition p3 of topic 'orders'. Drain it exactly once, in order, from the committed offset.",
+   "tasks": [
+    {
+     "task_id": "Rp3",
+     "brief": "Read partition p3's committed offset.",
+     "kinds": [
+      "READ"
+     ],
+     "read_tools": [
+      "partition.offsets"
+     ],
+     "write_tool": null,
+     "target": null,
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "T2"
+     ],
+     "gate_facts": []
+    },
+    {
+     "task_id": "Wp3",
+     "brief": "Drain partition p3 from its committed offset.",
+     "kinds": [
+      "WRITE"
+     ],
+     "read_tools": [],
+     "write_tool": "partition.drain",
+     "target": "p3",
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "Rp3"
+     ],
+     "gate_facts": [
+      {
+       "path": "group.state",
+       "op": "eq",
+       "value": "running"
+      }
+     ]
+    },
+    {
+     "task_id": "Cp3",
+     "brief": "Report your drained message count to the verifier.",
+     "kinds": [
+      "COMMUNICATE"
+     ],
+     "read_tools": [],
+     "write_tool": null,
+     "target": null,
+     "recipients": [
+      "agent:o4-verifier"
+     ],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "Wp3"
+     ],
+     "gate_facts": []
+    }
+   ]
+  },
+  {
+   "agent_id": "agent:o4-consumer-p4",
+   "title": "Consumer for partition p4",
+   "brief": "You own partition p4 of topic 'orders'. Drain it exactly once, in order, from the committed offset.",
+   "tasks": [
+    {
+     "task_id": "Rp4",
+     "brief": "Read partition p4's committed offset.",
+     "kinds": [
+      "READ"
+     ],
+     "read_tools": [
+      "partition.offsets"
+     ],
+     "write_tool": null,
+     "target": null,
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "T2"
+     ],
+     "gate_facts": []
+    },
+    {
+     "task_id": "Wp4",
+     "brief": "Drain partition p4 from its committed offset.",
+     "kinds": [
+      "WRITE"
+     ],
+     "read_tools": [],
+     "write_tool": "partition.drain",
+     "target": "p4",
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "Rp4"
+     ],
+     "gate_facts": [
+      {
+       "path": "group.state",
+       "op": "eq",
+       "value": "running"
+      }
+     ]
+    },
+    {
+     "task_id": "Cp4",
+     "brief": "Report your drained message count to the verifier.",
+     "kinds": [
+      "COMMUNICATE"
+     ],
+     "read_tools": [],
+     "write_tool": null,
+     "target": null,
+     "recipients": [
+      "agent:o4-verifier"
+     ],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "Wp4"
+     ],
+     "gate_facts": []
+    }
+   ]
+  },
+  {
+   "agent_id": "agent:o4-consumer-p5",
+   "title": "Consumer for partition p5",
+   "brief": "You own partition p5 of topic 'orders'. Drain it exactly once, in order, from the committed offset.",
+   "tasks": [
+    {
+     "task_id": "Rp5",
+     "brief": "Read partition p5's committed offset.",
+     "kinds": [
+      "READ"
+     ],
+     "read_tools": [
+      "partition.offsets"
+     ],
+     "write_tool": null,
+     "target": null,
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "T2"
+     ],
+     "gate_facts": []
+    },
+    {
+     "task_id": "Wp5",
+     "brief": "Drain partition p5 from its committed offset.",
+     "kinds": [
+      "WRITE"
+     ],
+     "read_tools": [],
+     "write_tool": "partition.drain",
+     "target": "p5",
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "Rp5"
+     ],
+     "gate_facts": [
+      {
+       "path": "group.state",
+       "op": "eq",
+       "value": "running"
+      }
+     ]
+    },
+    {
+     "task_id": "Cp5",
+     "brief": "Report your drained message count to the verifier.",
+     "kinds": [
+      "COMMUNICATE"
+     ],
+     "read_tools": [],
+     "write_tool": null,
+     "target": null,
+     "recipients": [
+      "agent:o4-verifier"
+     ],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "Wp5"
+     ],
+     "gate_facts": []
+    }
+   ]
+  },
+  {
+   "agent_id": "agent:o4-consumer-p6",
+   "title": "Consumer for partition p6",
+   "brief": "You own partition p6 of topic 'orders'. Drain it exactly once, in order, from the committed offset.",
+   "tasks": [
+    {
+     "task_id": "Rp6",
+     "brief": "Read partition p6's committed offset.",
+     "kinds": [
+      "READ"
+     ],
+     "read_tools": [
+      "partition.offsets"
+     ],
+     "write_tool": null,
+     "target": null,
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "T2"
+     ],
+     "gate_facts": []
+    },
+    {
+     "task_id": "Wp6",
+     "brief": "Drain partition p6 from its committed offset.",
+     "kinds": [
+      "WRITE"
+     ],
+     "read_tools": [],
+     "write_tool": "partition.drain",
+     "target": "p6",
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "Rp6"
+     ],
+     "gate_facts": [
+      {
+       "path": "group.state",
+       "op": "eq",
+       "value": "running"
+      }
+     ]
+    },
+    {
+     "task_id": "Cp6",
+     "brief": "Report your drained message count to the verifier.",
+     "kinds": [
+      "COMMUNICATE"
+     ],
+     "read_tools": [],
+     "write_tool": null,
+     "target": null,
+     "recipients": [
+      "agent:o4-verifier"
+     ],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "Wp6"
+     ],
+     "gate_facts": []
+    }
+   ]
+  },
+  {
+   "agent_id": "agent:o4-consumer-p7",
+   "title": "Consumer for partition p7",
+   "brief": "You own partition p7 of topic 'orders'. Drain it exactly once, in order, from the committed offset.",
+   "tasks": [
+    {
+     "task_id": "Rp7",
+     "brief": "Read partition p7's committed offset.",
+     "kinds": [
+      "READ"
+     ],
+     "read_tools": [
+      "partition.offsets"
+     ],
+     "write_tool": null,
+     "target": null,
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "T2"
+     ],
+     "gate_facts": []
+    },
+    {
+     "task_id": "Wp7",
+     "brief": "Drain partition p7 from its committed offset.",
+     "kinds": [
+      "WRITE"
+     ],
+     "read_tools": [],
+     "write_tool": "partition.drain",
+     "target": "p7",
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "Rp7"
+     ],
+     "gate_facts": [
+      {
+       "path": "group.state",
+       "op": "eq",
+       "value": "running"
+      }
+     ]
+    },
+    {
+     "task_id": "Cp7",
+     "brief": "Report your drained message count to the verifier.",
+     "kinds": [
+      "COMMUNICATE"
+     ],
+     "read_tools": [],
+     "write_tool": null,
+     "target": null,
+     "recipients": [
+      "agent:o4-verifier"
+     ],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "Wp7"
+     ],
+     "gate_facts": []
+    }
+   ]
+  },
+  {
+   "agent_id": "agent:o4-consumer-p8",
+   "title": "Consumer for partition p8",
+   "brief": "You own partition p8 of topic 'orders'. Drain it exactly once, in order, from the committed offset.",
+   "tasks": [
+    {
+     "task_id": "Rp8",
+     "brief": "Read partition p8's committed offset.",
+     "kinds": [
+      "READ"
+     ],
+     "read_tools": [
+      "partition.offsets"
+     ],
+     "write_tool": null,
+     "target": null,
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "T2"
+     ],
+     "gate_facts": []
+    },
+    {
+     "task_id": "Wp8",
+     "brief": "Drain partition p8 from its committed offset.",
+     "kinds": [
+      "WRITE"
+     ],
+     "read_tools": [],
+     "write_tool": "partition.drain",
+     "target": "p8",
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "Rp8"
+     ],
+     "gate_facts": [
+      {
+       "path": "group.state",
+       "op": "eq",
+       "value": "running"
+      }
+     ]
+    },
+    {
+     "task_id": "Cp8",
+     "brief": "Report your drained message count to the verifier.",
+     "kinds": [
+      "COMMUNICATE"
+     ],
+     "read_tools": [],
+     "write_tool": null,
+     "target": null,
+     "recipients": [
+      "agent:o4-verifier"
+     ],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "Wp8"
+     ],
+     "gate_facts": []
+    }
+   ]
+  },
+  {
+   "agent_id": "agent:o4-consumer-p9",
+   "title": "Consumer for partition p9",
+   "brief": "You own partition p9 of topic 'orders'. Drain it exactly once, in order, from the committed offset.",
+   "tasks": [
+    {
+     "task_id": "Rp9",
+     "brief": "Read partition p9's committed offset.",
+     "kinds": [
+      "READ"
+     ],
+     "read_tools": [
+      "partition.offsets"
+     ],
+     "write_tool": null,
+     "target": null,
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "T2"
+     ],
+     "gate_facts": []
+    },
+    {
+     "task_id": "Wp9",
+     "brief": "Drain partition p9 from its committed offset.",
+     "kinds": [
+      "WRITE"
+     ],
+     "read_tools": [],
+     "write_tool": "partition.drain",
+     "target": "p9",
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "Rp9"
+     ],
+     "gate_facts": [
+      {
+       "path": "group.state",
+       "op": "eq",
+       "value": "running"
+      }
+     ]
+    },
+    {
+     "task_id": "Cp9",
+     "brief": "Report your drained message count to the verifier.",
+     "kinds": [
+      "COMMUNICATE"
+     ],
+     "read_tools": [],
+     "write_tool": null,
+     "target": null,
+     "recipients": [
+      "agent:o4-verifier"
+     ],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "Wp9"
+     ],
+     "gate_facts": []
+    }
+   ]
+  },
+  {
+   "agent_id": "agent:o4-verifier",
+   "title": "Verifier",
+   "brief": "You confirm that all partitions are drained exactly once and report the total processed.",
+   "tasks": [
+    {
+     "task_id": "T3",
+     "brief": "Read final consumer lag for all partitions.",
+     "kinds": [
+      "READ"
+     ],
+     "read_tools": [
+      "consumer_group.status"
+     ],
+     "write_tool": null,
+     "target": null,
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "Wp0",
+      "Wp1",
+      "Wp2",
+      "Wp3",
+      "Wp4",
+      "Wp5",
+      "Wp6",
+      "Wp7",
+      "Wp8",
+      "Wp9"
+     ],
+     "gate_facts": []
+    },
+    {
+     "task_id": "T4",
+     "brief": "Submit the total number of messages processed across all partitions.",
+     "kinds": [
+      "ANALYZE"
+     ],
+     "read_tools": [],
+     "write_tool": null,
+     "target": null,
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {
+      "total_processed": {
+       "type": "integer"
+      },
+      "all_lag_zero": {
+       "type": "boolean"
+      }
+     },
+     "depends_on": [
+      "T3",
+      "Cp0",
+      "Cp1",
+      "Cp2",
+      "Cp3",
+      "Cp4",
+      "Cp5",
+      "Cp6",
+      "Cp7",
+      "Cp8",
+      "Cp9"
+     ],
+     "gate_facts": []
+    }
+   ]
+  }
+ ],
+ "structure_mapping": "OTel demo kafka consumer stall (simulated, not real Kafka): stalled consumer, per-partition lag, ordered drain by 10 shard owners, no duplicates; multi-shard cross-role coordination (12 active roles).",
+ "budgets": {
+  "max_duration_s": 420,
+  "max_model_turns_per_agent": 14
+ }
+}

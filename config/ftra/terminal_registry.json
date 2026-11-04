@@ -1,0 +1,29 @@
+{
+  "version": "3.0",
+  "domain": "finance",
+  "serial": 5,
+  "generated_at": "2026-10-03T00:00:00+00:00",
+  "issued_at": "2026-10-03T00:00:00+00:00",
+  "expires_at": "2027-09-30T00:00:00+00:00",
+  "system": "CAGE Financial Advisor",
+  "system_version": "1.2.0",
+  "fail_closed_note": "Any action absent from this registry is treated as IRREVERSIBLE_TERMINAL by IrreversibilityClassifier at runtime.",
+  "autonomous_envelope_note": "A registered terminal clears FTRA without a human only when 0 < amount <= max_magnitude and the agent's confidence >= FRIA zone_allow. The envelope is covered by manifest_sha256.",
+  "terminals": {
+    "check_balance": "READ_ONLY",
+    "execute_trade": "IRREVERSIBLE_TERMINAL",
+    "check_market_status": "READ_ONLY",
+    "market_analysis": "READ_ONLY",
+    "prompt_injection_check": "READ_ONLY",
+    "execute_trade_bounded": "EXTERNALLY_REVERSIBLE"
+  },
+  "autonomous_envelope": {
+    "execute_trade": {
+      "max_magnitude": 10000.0
+    },
+    "execute_trade_bounded": {
+      "max_magnitude": 10000.0
+    }
+  },
+  "manifest_sha256": "3c45c22fed34dc0c2a2705abc180f3ccb5a9b66990d3c023f1e522704bd385c5"
+}

@@ -1,0 +1,201 @@
+{
+ "schema_version": "legion.world.v1",
+ "world_id": "SYN-GAIA-NOI-W1",
+ "family": "SYN-GAIA-NOI",
+ "source_family": "GAIA2_STRUCTURAL",
+ "mission_text": "Provision directory user u42's requested plan exactly once. The directory API was recently changed and the provisioning backend is flaky.",
+ "initial_state": {
+  "directory": {
+   "u42": {
+    "uid": "u42",
+    "name": "Priya N.",
+    "requested_plan": "pro"
+   }
+  },
+  "accounts": {
+   "u42": {
+    "plan": null,
+    "provision_count": 0
+   }
+  }
+ },
+ "tools": {
+  "directory.lookup": {
+   "kind": "read",
+   "doc": "Look up a directory user. Params: user_id.",
+   "params": {
+    "user_id": {
+     "type": "string"
+    },
+    "uid": {
+     "type": "string"
+    }
+   },
+   "returns": {
+    "uid": "directory.{uid}.uid",
+    "requested_plan": "directory.{uid}.requested_plan",
+    "name": "directory.{uid}.name"
+   },
+   "faults": [
+    {
+     "type": "param_renamed",
+     "old": "user_id",
+     "new": "uid",
+     "after_event": null
+    }
+   ]
+  },
+  "accounts.status": {
+   "kind": "read",
+   "doc": "Provisioned account status.",
+   "params": {
+    "uid": {
+     "type": "string"
+    }
+   },
+   "returns": {
+    "account": "accounts.{uid}"
+   }
+  },
+  "accounts.provision": {
+   "kind": "write",
+   "doc": "Provision an account with a plan (not idempotent across separate commands).",
+   "params": {
+    "uid": {
+     "type": "string",
+     "enum": [
+      "u42"
+     ]
+    },
+    "plan": {
+     "type": "string",
+     "enum": [
+      "basic",
+      "pro"
+     ]
+    }
+   },
+   "target": "acct-{uid}",
+   "native_preconditions": [],
+   "effects": [
+    {
+     "op": "set",
+     "path": "accounts.{uid}.plan",
+     "value": {
+      "param": "plan"
+     }
+    },
+    {
+     "op": "inc",
+     "path": "accounts.{uid}.provision_count",
+     "value": 1
+    }
+   ],
+   "faults": [
+    {
+     "type": "error_first_n",
+     "n": 1,
+     "status": 503
+    },
+    {
+     "type": "lost_reply_nth",
+     "n": 2
+    }
+   ]
+  }
+ },
+ "events": [],
+ "roles": [
+  {
+   "agent_id": "agent:noi-operator",
+   "title": "Provisioning operator",
+   "brief": "You provision the requested account exactly once. Tools may fail or change; never create duplicates.",
+   "tasks": [
+    {
+     "task_id": "T1",
+     "brief": "Look up user u42's requested plan.",
+     "kinds": [
+      "READ"
+     ],
+     "read_tools": [
+      "directory.lookup"
+     ],
+     "write_tool": null,
+     "target": null,
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [],
+     "gate_facts": []
+    },
+    {
+     "task_id": "T2",
+     "brief": "Provision u42 with the requested plan.",
+     "kinds": [
+      "WRITE"
+     ],
+     "read_tools": [
+      "accounts.status"
+     ],
+     "write_tool": "accounts.provision",
+     "target": "acct-u42",
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "T1"
+     ],
+     "gate_facts": []
+    },
+    {
+     "task_id": "T3",
+     "brief": "If a provisioning reply is lost or uncertain, reconcile the command against the effect ledger before anything else.",
+     "kinds": [
+      "RECONCILE"
+     ],
+     "read_tools": [],
+     "write_tool": null,
+     "target": null,
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "T2"
+     ],
+     "gate_facts": []
+    }
+   ]
+  },
+  {
+   "agent_id": "agent:noi-verifier",
+   "title": "Verifier",
+   "brief": "You verify the final account.",
+   "tasks": [
+    {
+     "task_id": "T4",
+     "brief": "Verify u42's account after reconciliation.",
+     "kinds": [
+      "READ"
+     ],
+     "read_tools": [
+      "accounts.status"
+     ],
+     "write_tool": null,
+     "target": null,
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "T3"
+     ],
+     "gate_facts": []
+    }
+   ]
+  }
+ ],
+ "structure_mapping": "GAIA2 Noise slot: schema rename (user_id->uid), transient 503 error, lost reply after a successful effect; idempotent retry and reconciliation, no duplicate.",
+ "budgets": {
+  "max_duration_s": 420,
+  "max_model_turns_per_agent": 14
+ }
+}

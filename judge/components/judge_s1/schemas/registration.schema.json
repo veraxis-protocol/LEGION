@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:legion100:judge:schema:registration.schema.json",
+  "title": "registration.schema.json",
+  "description": "Legion v0.1 synthetic evaluator schema, not a live attestation",
+  "type": "object",
+  "properties": {
+    "campaign_id": {
+      "type": "string"
+    },
+    "mission_id": {
+      "type": "string"
+    },
+    "scenario_id": {
+      "type": "string"
+    },
+    "source_family": {
+      "type": "string"
+    },
+    "attempt_index": {
+      "const": 1
+    },
+    "frozen_before_execution": {
+      "const": true
+    },
+    "eligible": {
+      "type": "boolean"
+    },
+    "invalid_policy": {
+      "type": "string",
+      "enum": [
+        "count_as_nonpass",
+        "exclude_preregistered"
+      ]
+    },
+    "split": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "campaign_id",
+    "mission_id",
+    "scenario_id",
+    "source_family",
+    "attempt_index",
+    "frozen_before_execution",
+    "eligible",
+    "invalid_policy"
+  ],
+  "additionalProperties": true
+}

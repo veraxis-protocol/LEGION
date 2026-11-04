@@ -1,0 +1,1637 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# OSCAL Component Definition
+# Cybernetic Governance Engine — NIST SP 800-53 Rev 5 HIGH Baseline
+#
+# This file maps the top 15 SP 800-53 HIGH-baseline controls to the
+# technical components that enforce them. It complements the ISO 42001
+# component definition (component-definition.yaml).
+#
+# Used by: lula validate --input compliance/oscal/sp800-53-component-definition.yaml
+# Companion: compliance/oscal/component-definition.yaml (ISO 42001 controls)
+# SSP Reference: compliance/ssp/SYSTEM_SECURITY_PLAN_OUTLINE.md
+# Categorization: compliance/categorization/FIPS199_CATEGORIZATION.md
+
+component-definition:
+  uuid: "172cb046-96dc-47bb-9209-38ec37dbd579"
+  metadata:
+    title: "Cybernetic Governance Engine — NIST SP 800-53 Rev 5 Component Definition"
+    version: "1.0.0"
+    oscal-version: "1.0.4"
+    last-modified: "2026-03-06T00:00:00Z"
+    remarks: >
+      This component definition maps technical enforcement components to
+      NIST SP 800-53 Rev 5 HIGH-baseline controls. Each implemented requirement
+      links where applicable to a Lula validation manifest for automated
+      continuous compliance assessment. Satisfies CA-2 (Security Assessment)
+      and PL-2 (System Security Plan) documentation requirements.
+
+  components:
+    # -----------------------------------------------------------------------
+    # Component 1: Governance Gateway (src/gateway/)
+    # Enforces: AC-3 (Access Enforcement), AU-12 (Audit Record Generation),
+    #           SC-12 (Cryptographic Key Establishment)
+    # -----------------------------------------------------------------------
+    - uuid: "56654b26-d648-4e47-bbc8-19edd3ec67ba"
+      title: "Governance Gateway"
+      type: software
+      description: >
+        Python FastAPI gateway providing three-tier semantic shielding and
+        deny-by-default ingress authentication by Linkerd mTLS workload
+        identity (src/gateway/server/workload_identity.py). Implements
+        OPA-backed RBAC enforcement, OTel-based audit trail generation, and
+        KMS-signed routing seals on governance decisions.
+      purpose: >
+        Acts as the primary ingress enforcement layer for all AI governance
+        requests. Enforces access control via OPA, generates ISO 42001
+        6-attribute evidence stamps on every governance decision, and
+        admits only callers whose mesh-verified workload identity is trusted.
+      responsible-roles:
+        - role-id: provider
+      control-implementations:
+        - uuid: "6f075699-75de-4f31-a574-35bb22a194bd"
+          source: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home"
+          description: "NIST SP 800-53 Rev 5 HIGH-baseline controls implemented by the Governance Gateway"
+          implemented-requirements:
+            - uuid: "12e40b44-a5eb-4e0d-b319-42bab7d5d10a"
+              control-id: ac-3
+              description: |
+                Access enforcement is implemented via OPA RBAC policy evaluation on every
+                inbound API request through deployment/system_authz.rego. Before any
+                handler runs, WorkloadIdentityMiddleware
+                (src/gateway/server/workload_identity.py) rejects with 403 every request
+                outside a small exact open-path list (health, metrics, JWKS; no prefixes)
+                unless its Linkerd-verified l5d-client-id is listed in
+                CAGE_TRUSTED_CLIENT_IDENTITIES (the advisor only), verified in CI by
+                tests/integration/test_linkerd_mesh_conformance.py (POAM-2026-080 closed).
+                OPA allow/deny decisions are recorded in
+                structured audit logs with full request context and user identity.
+
+                Dual-control authentication enforcement (Work Item 2, 2026-09-07): All defer
+                escalation endpoints now require cryptographically-verified operator identity.
+                The /v1/defer/escalate endpoint (src/compliance_bridge/main.py:1527) enforces
+                Depends(require_internal_token) to prevent unauthenticated access. The
+                /v1/defer/inject endpoint (src/compliance_bridge/main.py:1326) also requires
+                internal token authentication. No /v1/defer/ route is reachable without
+                authentication in production (CAGE_ENV=prod/staging).
+
+                Quorum enforcement mechanism: DeferQueue.approve() (src/gateway/governance/defer_queue.py:447)
+                enforces distinctness of approver_urn values via WATCH/MULTI/EXEC atomic
+                transaction (lines 510-518). The approver_urn is provably derived from
+                transport-layer verified SPIFFE SVID (primary) or OIDC JWT subject (gated
+                fallback). Single authenticated principal cannot reach quorum - duplicate
+                approvals are rejected with ALREADY_APPROVED status (line 511-518). Required
+                quorum is auto-computed from defer_reason: quorum-3 for FTRA_IRREVERSIBLE_TERMINAL,
+                EXTERNAL_VALIDATION, and FLOWSIGNAL_ESCALATION defer reasons; quorum-2 for
+                all others (src/gateway/governance/defer_queue.py:66-80).
+
+                Protection against single-principal quorum bypass: The defer_inject endpoint
+                rejects injection attempts for quorum-3 defer reasons (line 1377-1392) and
+                rejects injection if token has partial approvals (line 1394-1405), preventing
+                circumvention of the dual-control requirement via automated data injection.
+
+                Approval binding (D-H, 2026-10-01): DeferQueue.approve() stamps each
+                ApprovalRecord server-side with approved_barrier_preview, the phase-2 barrier
+                snapshot (PASS/FAIL) recorded on the token when it was parked; a client-supplied
+                value is overwritten. consume_approval() refuses a token whose approvals are bound
+                to a different snapshot, and SymbolicGovernor.revalidate_post_hitl() refuses the
+                committing run with GovernanceError [APPROVAL_CONTEXT_DRIFT] when an approval
+                given against PASS meets barriers that now refuse; no routing seal is minted and
+                phase-2 commits are rolled back. Verified by tests/test_trade_governance_e2e.py
+                (D-H scenarios) against real DeferQueue, CBF and fiscal state in fakeredis.
+
+                Single-commit execution and advisory narrowing (Phases 2–3, 2026-10-01):
+                Pre-flight validation (SymbolicGovernor.validate_action in
+                src/gateway/governance/governor/governor.py) runs under Profile.DRY_RUN,
+                mutates no state, and mints no GovernanceSeal. When an action requires human
+                approval (REQUIRE_APPROVAL), validate_action() parks a DeferToken
+                (DeferReason.HITL_REQUIRED) in DeferQueue and returns deferred_id;
+                execute_trade_action(..., deferred_id=...) (src/governed_financial_advisor/tools/trades.py)
+                is the sole committing path: enforce_approved_governance()
+                (src/gateway/server/governance_middleware.py) checks the approved token without
+                spending it (DeferQueue.redeemable_approval()) and hands
+                SymbolicGovernor.revalidate_post_hitl() an unspent PostHitlApproval. The governor
+                spends it atomically (DeferQueue.consume_approval(), a RESOLVED to CONSUMED CAS)
+                only after every stage passes and before the seal is minted, so a DENY spends it,
+                a warrant-ineligible DEFER leaves it redeemable (POAM-2026-104), and concurrent
+                redemptions seal at most once.
+                When narrowing is enabled, any narrow_hint / narrowed_params attached to a
+                REQUIRE_APPROVAL verdict is purely advisory: it is dry-run re-verified before
+                surfacing (_reverified_narrow_hint) and re-verified in full by the single
+                committing run (_sealed_narrow with tamper-evident issue_narrow_receipt in
+                src/gateway/governance/narrow_receipt.py inside ReservationScope). Every
+                pipeline run (including Profile.POST_HITL in SymbolicGovernor.revalidate_post_hitl())
+                verifies that the action is in governor.claimed_actions
+                (src/gateway/governance/governor/pipeline.py), refusing unclaimed actions with
+                ADR009_ACTION_NOT_CLAIMED ([ACTION_NOT_CLAIMED]), and assemble_governor()
+                (src/gateway/governance/governor/assembly.py) verifies at startup that every
+                claimed action is registered in the FTRA terminal registry.
+              props:
+                - name: implementation-status
+                  value: implemented
+                - name: control-origination
+                  value: system-specific
+                - name: dual-control-implementation-date
+                  value: "2026-09-07"
+                - name: spiffe-enforcement-date
+                  value: "2026-09-22"
+                - name: approval-binding-date
+                  value: "2026-10-01"
+                - name: breaking-change
+                  value: "removed X-Agent-ID and X-SPIFFE-ID header parsing; mTLS client certificate required"
+              description: |
+                AC-3 (Access Enforcement) is implemented through multiple layers:
+
+                1. **Kernel-Level Workload Identity Extraction (2026-09-22 BREAKING CHANGE)**:
+                   All public inference and AGW ingress endpoints enforce strict Linkerd mTLS
+                   workload identity validation. Under Linkerd mTLS, the Linkerd inbound proxy
+                   terminates TLS and sets `l5d-client-id`
+                   (`<sa>.<ns>.serviceaccount.identity.linkerd.<trust-domain>`). Gateway ingress
+                   authentication and caller identity extraction live in
+                   src/gateway/server/workload_identity.py (`WorkloadIdentityMiddleware` and
+                   `extract_client_identity(scope)`). HTTP header-based identity
+                   (X-Agent-ID, X-SPIFFE-ID) has been deprecated and removed.
+                   Requests without a verified Linkerd workload identity fail closed (403/401).
+
+                   `WorkloadIdentityMiddleware` and `extract_client_identity(scope)` validate:
+                   - Presence of a single Linkerd-verified `l5d-client-id` header in ASGI scope
+                   - Match against Linkerd workload identity syntax (`<sa>.<ns>.serviceaccount.identity.linkerd.<trust-domain>`)
+                   - Membership in `CAGE_TRUSTED_CLIENT_IDENTITIES` (required and enforced in every environment)
+                   - Fails closed on any validation error (403 Forbidden / 401 Unauthorized)
+
+                2. **Agent-to-Agent (A2A) Authorization with SPIFFE Prefix Matching**:
+                   Parent agent SPIFFE IDs are evaluated against subagent authorization
+                   policies using declarative OPA Rego rules (config/opa/agent_catalog.rego).
+                   Subagents declare `authorized_parent_prefixes` arrays enabling hierarchical
+                   trust delegation without enumerating every parent SPIFFE ID.
+
+                   Example authorization flow:
+                   - Parent: spiffe://cluster.local/ns/agents/sa/orchestrator
+                   - Subagent authorized_parent_prefixes: ["spiffe://cluster.local/ns/agents/"]
+                   - OPA evaluation: startswith(parent_spiffe, prefix) → allow
+
+                3. **Dual-Control Authentication for DEFER Escalation**:
+                   defer_escalate() and defer_inject() enforce quorum authentication via
+                   DeferQueue.approve() as documented in previous implementation.
+
+                BREAKING CHANGE: Removed anonymous fallback and HTTP header identity parsing.
+                Unauthenticated requests fail closed (401/403). This change enforces cryptographic
+                identity binding at the kernel level, eliminating header spoofing attack surface.
+              links:
+                - href: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home?element=AC-3"
+                  rel: reference
+                - href: "#9fbe4cdd-f9b0-4635-bc7d-6a3a3beae05a"
+                  rel: lula
+                - href: "../../src/gateway/server/workload_identity.py"
+                  rel: implementation
+                  text: "Gateway workload identity enforcement and extraction (WorkloadIdentityMiddleware, extract_client_identity)"
+                - href: "../../config/opa/agent_catalog.rego"
+                  rel: implementation
+                  text: "A2A authorization with SPIFFE namespace prefix matching"
+                - href: "../../src/compliance_bridge/main.py"
+                  rel: implementation
+                  text: "defer_escalate() and defer_inject() authentication enforcement"
+                - href: "../../src/gateway/governance/defer_queue.py"
+                  rel: implementation
+                  text: "DeferQueue.approve() quorum enforcement"
+                - href: "../../tests/test_inference_proxy_extended.py"
+                  rel: test
+                  text: "SPIFFE enforcement and fail-closed authentication test coverage"
+                - href: "../../tests/test_defer_dual_control_auth.py"
+                  rel: test
+                  text: "Adversarial dual-control authentication test coverage"
+                - href: "../../tests/test_trade_governance_e2e.py"
+                  rel: test
+                  text: "Approval binding to the approved barrier snapshot (APPROVAL_CONTEXT_DRIFT)"
+
+            - uuid: "4ccc6861-3f69-476a-9ff2-cbd215b18d46"
+              control-id: au-12
+              description: |
+                Audit record generation is implemented via OpenTelemetry spans in
+                src/gateway/infrastructure/telemetry.py and the provenance chain in
+                src/gateway/governance/provenance_chain.py. CAGE provides two distinct
+                auditing modes to support different consistency/availability trade-offs:
+
+                1. DECISION-TIME AUDIT (fire-and-forget, default mode):
+                   Records governance decisions asynchronously via OTel spans. Every
+                   governance decision emits a span containing ISO 42001 6-attribute
+                   evidence stamps: control_id, decision_outcome, timestamp_utc,
+                   request_id, user_role, and enforcement_tier. This mode prioritizes
+                   availability — the routing seal is issued immediately after the
+                   governance decision, without waiting for audit record persistence.
+                   Spans are exported to Langfuse asynchronously for retention.
+                   Domain tiers (like the financial package) are injected dynamically
+                   via plugin registration, and the active tier list is logged at startup.
+
+                2. EVIDENCE-OF-EXECUTION AUDIT (blocking mode, EVIDENCE_CHAIN_BLOCKING=true):
+                   Ensures evidence commit before seal issuance, providing stronger
+                   non-repudiation guarantees. When enabled via the EVIDENCE_CHAIN_BLOCKING
+                   environment variable, the provenance chain (provenance_chain.py) must
+                   successfully persist the evidence record to the backing store before
+                   the routing seal is computed and returned. This mode ties the
+                   cryptographic seal directly to a committed evidence record, ensuring
+                   that no seal can exist without a corresponding audit trail entry.
+                   The evidence record includes a hash-linked chain for time-correlation.
+
+                Key distinction: Decision-time audit records WHAT was decided; evidence-
+                of-execution audit proves THAT the decision was recorded before action.
+                The blocking mode satisfies AU-12(1) system-wide/time-correlated audit
+                trail requirements through hash-linked evidence chain correlation.
+
+                Refusal and deferral parity (0cdb5aaa, #427): a DENY writes a
+                GOVERNANCE_REFUSAL record and a DEFER or REQUIRE_APPROVAL writes a
+                hash-chained GOVERNANCE_DEFERRAL record (verdicts.publish_refusal /
+                publish_deferral in src/gateway/governance/governor/verdicts.py).
+                These writes are non-blocking, because neither outcome executes
+                anything, but a failed write is never silent: it logs at ERROR and
+                increments cage_governance_evidence_publish_failures_total{kind}
+                (src/gateway/governance/governor/metrics.py; a no-op when
+                prometheus_client is absent).
+
+                The backward-compatibility remediation (BC-01–BC-08, 2026-08-27) removed
+                all dual-schema machinery (v1.0/v1.1 support) from the evidence pipeline
+                and compliance-bridge. Hash-chain canonicalization in evidence_stream.py
+                and context_accumulator.py now uses RFC 8785 JCS (jcs_canonicalize_plan)
+                exclusively, with a /2.0 schema sentinel. The five canonical decision values
+                (ALLOW, DENY, DEFER, NARROW, REQUIRE_APPROVAL) are enforced in
+                provenance_chain.py (VALID_DECISIONS, derived from the GovernanceDecision
+                enum). PAUSE was removed on 2026-10-01: a transient infrastructure fault
+                is a DENY with a refusal receipt; historical PAUSE records remain readable
+                (provenance_chain.LEGACY_PAUSE) but cannot be newly built. The compliance-bridge aggregates
+                spans into OSCAL Assessment Results via audit_workflow.py.
+
+                3. ATTESTATION FETCH AUDIT (Phase 5b C3, POAM-2026-072, 2026-09-09):
+                   Attestation fetch operations generate structured audit records capturing
+                   provider_name, fetch attempt timestamp, success/failure outcome, and error
+                   details. The ExternalAttestation dataclass (src/gateway/governance/attestation.py)
+                   includes a dedicated provider_name field for first-class provider attribution,
+                   eliminating ambiguity in multi-provider environments. The AttestationAggregator._do_fetch()
+                   method (src/gateway/governance/attestation_aggregator.py) wraps external provider
+                   calls in try-except blocks that pre-capture provider context before execution,
+                   ensuring defect diagnosis remains possible even when the fetch operation fails.
+                   ERROR-status attestations embed structured failure metadata directly into the
+                   ExternalAttestation record, preserving fetch failures as first-class evidence
+                   for non-repudiation analysis (AU-10 correlation).
+              props:
+                - name: implementation-status
+                  value: implemented
+                - name: control-origination
+                  value: system-specific
+                - name: evidence-chain-blocking
+                  value: "configurable via EVIDENCE_CHAIN_BLOCKING env var"
+                - name: au-12-1-enhancement
+                  value: "hash-linked evidence chain provides time-correlated audit trail"
+                - name: jcs-canonicalization
+                  value: "RFC 8785 JCS for deterministic cross-platform evidence integrity"
+                - name: canonical-decision-vocabulary
+                  value: "ALLOW, DENY, DEFER, NARROW, REQUIRE_APPROVAL"
+                - name: attestation-fetch-audit-implementation-date
+                  value: "2026-09-09"
+              links:
+                - href: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home?element=AU-12"
+                  rel: reference
+                - href: "#a08c55f1-6d12-445d-b4ae-a99c8b573935"
+                  rel: lula
+                - href: "../../src/gateway/governance/attestation.py"
+                  rel: implementation
+                  text: "ExternalAttestation dataclass with provider_name field"
+                - href: "../../src/gateway/governance/attestation_aggregator.py"
+                  rel: implementation
+                  text: "AttestationAggregator._do_fetch() try-block pre-capture"
+
+            - uuid: "c3-au10-attestation-2026-0909"
+              control-id: au-10
+              description: |
+                Non-repudiation of attestation fetch operations is implemented via dedicated
+                provider attribution and error-preserving audit trails. The ExternalAttestation
+                dataclass (src/gateway/governance/attestation.py) includes a first-class
+                provider_name field that records the originating attestation provider for
+                every fetch operation, ensuring unambiguous attribution in multi-provider
+                environments. The AttestationAggregator._do_fetch() method wraps all external
+                provider calls in try-except blocks that capture provider context BEFORE
+                the fetch operation executes, guaranteeing that provider identity and
+                diagnostic context survive even when the fetch operation raises an exception.
+
+                ERROR-status attestations are constructed as complete ExternalAttestation
+                records embedding structured failure metadata (exception type, message,
+                timestamp) rather than being discarded or logged ephemerally. This design
+                ensures that fetch failures enter the tamper-evident evidence chain with
+                the same completeness as successful fetch operations, satisfying non-repudiation
+                requirements for negative outcomes (AU-10). All attestation records participate
+                in the hash-linked evidence chain described in AU-12, providing time-correlated
+                audit trail binding between governance decisions and their supporting external
+                attestations.
+
+                Warrant reliance (0cdb5aaa, #427; VEIP v0.2 conformance 2026-10-10):
+                for a warranted norm, the RelianceRecord
+                (src/gateway/governance/warrant/reliance.py) naming the warrant_id,
+                declared digest, standing and provider_name is bound into the routing
+                seal's evidence record and covered by record_hash, so the seal commits
+                to the reliance the decision made; under VEIP v0.2
+                (src/gateway/governance/warrant/trust_anchor.py, POAM-2026-104 closed
+                2026-10-10) the record and the envelope's WARRANT attestation carry
+                status VERIFIED once the Ed25519 warrant signature is verified against
+                a kid-resolved VerifiedKeyManifest anchored to an out-of-band
+                WarrantTrustAnchor (or UNVERIFIED when unsigned or signature
+                verification fails). Since 9ddefb8c
+                (#430) the record also carries observed_at (CAGE's receipt time of
+                the warrant state), age_seconds and max_age_seconds, so the seal
+                commits to how fresh the relied-on state was; a warrant older than
+                the 60 s window whose re-fetch failed (or whose v0.2 issuer
+                state_as_of exceeds 60 s) is recorded as
+                INELIGIBLE_STALE (src/gateway/governance/warrant/cache.py,
+                src/gateway/governance/warrant/verifier.py).
+                Since POAM-2026-111 (2026-10-07) the hash-chained record carries
+                every Warrant Contract v0.1 evidence field (warrant_id, norm_id,
+                digest as warrant_digest, reliance_status, governing_version as
+                warrant_governing_version, residual_risk_ref recorded opaquely,
+                attested_at) plus issuing_authority, authority_basis,
+                revocation_ref and required_governing_version (the version the
+                binding requires, kept apart from the version the warrant
+                declares), and the envelope WARRANT attestation is derived from
+                the same record (its metadata equals the record), so the signed
+                envelope and the evidence chain cannot disagree (AU-3, AU-10).
+
+                This remediation (Phase 5b C3, POAM-2026-072, closed 2026-09-09) addresses
+                defect patterns where provider identity was inferred from ambient context
+                or where fetch failures produced ephemeral logs rather than durable evidence
+                records suitable for compliance reporting and incident investigation.
+              props:
+                - name: implementation-status
+                  value: implemented
+                - name: control-origination
+                  value: system-specific
+                - name: poam-reference
+                  value: "POAM-2026-072"
+                - name: phase-5b-c3-implementation-date
+                  value: "2026-09-09"
+              links:
+                - href: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home?element=AU-10"
+                  rel: reference
+                - href: "../../src/gateway/governance/attestation.py"
+                  rel: implementation
+                  text: "ExternalAttestation.provider_name first-class field"
+                - href: "../../src/gateway/governance/attestation_aggregator.py"
+                  rel: implementation
+                  text: "AttestationAggregator._do_fetch() pre-capture error handling"
+
+            - uuid: "0c2d40d7-0d19-4b9d-9afa-6c80967b31b4"
+              control-id: sc-13
+              description: |
+                Asymmetric routing seals round-trip under every supported KMS key type
+                (POAM-2026-095). generate_seal() (src/gateway/governance/routing_seal.py)
+                writes the signer's JOSE algorithm (jose_alg) into the protected header
+                rather than a provider label, and KMSGovernanceSigner.sign_jws()
+                (src/gateway/governance/kms_signer.py) converts ECDSA DER signatures to
+                the JOSE raw R||S form; providers declare their native ECDSA encoding.
+                The verifier accepts only ES256/ES384/ES512 for EC keys. Seal
+                verification resolves keys strictly by kid (src/gateway/governance/jwks.py):
+                a seal with no kid no longer falls back to a single published key and
+                fails closed.
+              props:
+                - name: implementation-status
+                  value: implemented
+                - name: control-origination
+                  value: system-specific
+                - name: poam-reference
+                  value: "POAM-2026-095"
+              links:
+                - href: "../../src/gateway/governance/routing_seal.py"
+                  rel: implementation
+                  text: "generate_seal() JOSE alg header"
+                - href: "../../src/gateway/governance/kms_signer.py"
+                  rel: implementation
+                  text: "KMSGovernanceSigner.sign_jws() DER to raw conversion"
+                - href: "../../src/gateway/governance/jwks.py"
+                  rel: implementation
+                  text: "kid-required key resolution"
+                - href: "../../tests/test_routing_seal_asymmetric_roundtrip.py"
+                  rel: test
+
+            - uuid: "17537e23-e213-4c9c-b583-68992eb29794"
+              control-id: ca-7
+              description: |
+                Continuous ground-truth reconciliation keeps verified CBF state fresh
+                (POAM-2026-096). The reconciliation worker
+                (deployment/k8s/reconciliation-worker.yaml) runs as a single-replica
+                Deployment in loop mode, polling every 60 s against a 300 s verified-state
+                TTL, and run_loop() (src/gateway/governance/reconciliation/daemon.py)
+                refuses to start when the TTL is less than twice the poll interval, so
+                verified state cannot lapse between runs. When the discrepancy guard trips,
+                the daemon records the failure, advances the fence epoch, and invalidates
+                state; it never writes the CBF state key from an unverified reading.
+              props:
+                - name: implementation-status
+                  value: implemented
+                - name: control-origination
+                  value: system-specific
+                - name: poam-reference
+                  value: "POAM-2026-096"
+              links:
+                - href: "../../deployment/k8s/reconciliation-worker.yaml"
+                  rel: implementation
+                  text: "Reconciler Deployment (loop mode)"
+                - href: "../../src/gateway/governance/reconciliation/daemon.py"
+                  rel: implementation
+                  text: "run_loop() TTL/poll guard and floor branch"
+                - href: "../../tests/test_reconciliation_worker_manifest.py"
+                  rel: test
+                - href: "../../tests/test_reconciliation_discrepancy_floor.py"
+                  rel: test
+
+            - uuid: "943496c8-5b07-48e4-a175-731366d416fa"
+              control-id: si-10
+              description: |
+                Ground-truth sequence numbers are checked atomically and fail closed
+                (POAM-2026-097). The CBF engine (src/gateway/governance/safety/cbf_engine.py)
+                performs the replay check as a single Redis Lua compare-and-advance: a
+                sequence regression is rejected, an equal sequence (re-read) is accepted,
+                and the read and write cannot interleave with a concurrent writer. A Redis
+                error during the check is treated as a violation rather than a pass.
+              props:
+                - name: implementation-status
+                  value: implemented
+                - name: control-origination
+                  value: system-specific
+                - name: poam-reference
+                  value: "POAM-2026-097"
+              links:
+                - href: "../../src/gateway/governance/safety/cbf_engine.py"
+                  rel: implementation
+                  text: "Atomic Lua sequence compare-and-advance"
+                - href: "../../tests/test_replay_defense.py"
+                  rel: test
+
+            - uuid: "2de236dc-7f43-4ec2-939e-febbed7f1a5c"
+              control-id: au-10
+              description: |
+                Actuation outcomes are three-valued, recorded exactly once, and carry a
+                signature verification status (POAM-2026-098). ActuationReceipt
+                (src/gateway/governance/seams/actuation.py) distinguishes ACCEPTED,
+                REJECTED and UNKNOWN; an UNKNOWN outcome is never retryable and settles as
+                possibly executed, so an indeterminate dispatch cannot release reserved
+                capacity. The kernel dispatch_actuation()
+                (src/gateway/governance/execution_actuator.py) is the sole caller of
+                actuate() and the sole writer of actuation evidence: it converts an
+                actuator exception into an UNKNOWN receipt and records every receipt once
+                as ACTUATION_RECEIPT, ACTUATION_REFUSAL_RECEIPT or
+                ACTUATION_INDETERMINATE_RECEIPT. Each receipt carries a ReceiptVerification
+                status (VERIFIED / UNVERIFIED / INVALID). The actuator_01 adapter verifies
+                an optional detached Ed25519 receipt signature against a key resolved by
+                kid from an independently fetched manifest
+                (src/integrations/actuator_01/receipt_verifier.py), never from the receipt;
+                an invalid signature, unknown kid or envelope-digest mismatch forces the
+                outcome to UNKNOWN, and a strict mode treats unsigned receipts the same way.
+                Residual: the receipt signature format is a CAGE-proposed extension that
+                the partner has not yet adopted, so live receipts are recorded as
+                UNVERIFIED until partner adoption and over-the-wire conformance testing.
+              props:
+                - name: implementation-status
+                  value: partial
+                - name: control-origination
+                  value: system-specific
+                - name: poam-reference
+                  value: "POAM-2026-098"
+              links:
+                - href: "../../src/gateway/governance/execution_actuator.py"
+                  rel: implementation
+                  text: "dispatch_actuation() single evidence owner"
+                - href: "../../src/gateway/governance/seams/actuation.py"
+                  rel: implementation
+                  text: "ActuationOutcome and ReceiptVerification"
+                - href: "../../src/integrations/actuator_01/receipt_verifier.py"
+                  rel: implementation
+                  text: "kid-resolved receipt signature verification"
+                - href: "../../tests/test_actuation_outcome.py"
+                  rel: test
+                - href: "../../tests/test_actuator_01_receipt_verification.py"
+                  rel: test
+
+            - uuid: "61c43f8a-6693-4049-ae09-edd8b22f500a"
+              control-id: sc-12
+              description: |
+                Signing keys are established in Cloud KMS by Terraform
+                (infra/targets/gcp-gke/kms_signing.tf) on a dedicated signing keyring
+                separate from the symmetric CMEK keyring (infra/modules/kms/main.tf): one
+                asymmetric EC_SIGN_P256_SHA256 key per signer (gateway-seal via
+                KMS_GOVERNANCE_KEY, reconciler-snapshot via RECONCILER_KMS_KEY,
+                compliance-evidence via EVIDENCE_KMS_KEY, benchmark-signing),
+                HSM-protected outside dev postures. Private keys never leave KMS. Each
+                key has an authoritative key-level IAM policy granting
+                roles/cloudkms.signer to its owning workload's GCP service account only;
+                verifiers receive roles/cloudkms.publicKeyViewer. No KMS role is granted
+                at keyring or project scope, and a static guard
+                (tests/infrastructure/test_workload_identity_partition.py) fails the
+                build if one is added.
+
+                The HMAC-SHA256 seal fallback keyed by GOVERNANCE_SALT
+                (src/gateway/governance/routing_seal.py) is a dev-posture fallback only;
+                enforcing postures refuse it at startup via assert_production_posture()
+                (src/gateway/governance/governor/posture.py), which receives kms_signing_mode
+                from KMSGovernanceSigner during bootstrap_governor()
+                (src/gateway/governance/governor/bootstrap.py) and exits 1 unless
+                kms_signing_mode == "strict", and it is not evidence for this
+                control. The former HMAC ingress secret (CAGE_ROUTING_SEAL_SECRET) is
+                retired (POAM-2026-080 closed). The advisor has zero KMS signer bindings
+                and zero seal secrets (POAM-2026-079 closed).
+              props:
+                - name: implementation-status
+                  value: implemented
+                - name: control-origination
+                  value: system-specific
+              links:
+                - href: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home?element=SC-12"
+                  rel: reference
+
+            - uuid: "2f94e8b5-7d3a-4c61-b9f4-8e5a9d6c3f2a"
+              control-id: sc-13
+              description: |
+                Cryptographic protection is implemented via the RawMessageSigner protocol
+                abstraction (src/gateway/governance/raw_signer_protocol.py) for KMS-signed
+                ConsequenceToken JWS (src/gateway/governance/consequence_token.py) introduced
+                in FlowSignal Phase 2. The RawMessageSigner protocol decouples cryptographic
+                operations from key lifecycle management via dependency injection in
+                actuator_01 (src/integrations/actuator_01/adapter.py:117-142), replacing
+                direct KMSGovernanceSigner coupling. ConsequenceToken.mint() uses the
+                injected signer's sign_raw() to produce a compact JWS with 8 claims
+                (sub, tid, rec, act, ver, iat, exp, jti). The signing algorithm is
+                determined by the KMS key type (ES256/ES384 for ECDSA, EdDSA for Ed25519,
+                PS256/RS256 for RSA). ConsequenceToken.verify() validates the JWS signature
+                via verify_raw(), rejects alg:none, and enforces algorithm consistency
+                (protected header alg must match signer.jose_alg). All cryptographic
+                operations fail closed — bad signature, expired token, algorithm confusion,
+                or malformed claims raise ConsequenceTokenError. The token carries a SHA-256
+                digest of the RFC 8785 JCS-canonicalized action payload in the 'act' claim,
+                providing cryptographic binding between governance evaluation and execution.
+                The backward-compatibility remediation (BC-01–BC-08, 2026-08-27) migrated
+                all hash-chain modules (provenance_chain.py, evidence_stream.py,
+                context_accumulator.py) from json.dumps(sort_keys=True) to RFC 8785 JCS
+                (jcs_canonicalize_plan) for deterministic cross-platform evidence integrity
+                verification. This migration was a breaking change — records written before
+                2026-08-27 are not verifiable by the current code. No cryptographic path is
+                excluded from JCS: the WORM-bucket KMS signing payload built by _sign_record()
+                in uca_logger.py was migrated to RFC 8785 JCS with no compatibility shim and
+                no carve-out, so previously-signed WORM UCA records will not verify under the
+                current algorithm. That break is accepted because the data-at-rest
+                read-compatibility exception is dormant, not active (see the Dormant Rules
+                section of AGENTS.md).
+              props:
+                - name: implementation-status
+                  value: implemented
+                - name: control-origination
+                  value: system-specific
+                - name: phase-2-implementation
+                  value: "true"
+                - name: raw-signer-protocol
+                  value: "src/gateway/governance/raw_signer_protocol.py"
+                - name: actuator-01-di
+                  value: "src/integrations/actuator_01/adapter.py:117-142"
+              links:
+                - href: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home?element=SC-13"
+                  rel: reference
+
+            - uuid: "c5c6-ia5-kms-lifecycle-00001111"
+              control-id: ia-5
+              description: |
+                Authenticator management is implemented via multi-vendor KMS support
+                ('gcp', 'aws', 'azure') through BaseKMSProvider abstraction
+                (src/gateway/governance/kms_provider.py). Key lifecycle management follows
+                documented rotation schedules in docs/operations/KEY_ROTATION.md: 90-day
+                rotation for Cloud KMS HSM keys, 30-day rotation for HMAC routing seal
+                secrets. RawMessageSigner dependency injection (src/gateway/governance/raw_signer_protocol.py)
+                decouples cryptographic execution from key lifecycle, enabling zero-downtime
+                key rotation without code changes. Multi-vendor support allows cryptographic
+                operations to remain vendor-neutral at the application layer while enforcing
+                jurisdiction-specific key residency requirements (US Federal: Cloud KMS in
+                us-central1, EU ECB: AWS KMS in eu-west-1, APAC MAS: Azure Key Vault in
+                southeastasia). Emergency key revocation procedures documented in
+                docs/operations/KEY_ROTATION.md include immediate rotation triggers
+                (detected key compromise, cryptographic algorithm deprecation, regulatory
+                mandate) and fail-closed behavior (expired or revoked keys rejected with
+                structured audit trail).
+              props:
+                - name: implementation-status
+                  value: implemented
+                - name: control-origination
+                  value: system-specific
+                - name: kms-rotation-schedule-hsm
+                  value: "90-day"
+                - name: kms-rotation-schedule-hmac
+                  value: "30-day"
+                - name: multi-vendor-kms
+                  value: "gcp, aws, azure"
+              links:
+                - href: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home?element=IA-5"
+                  rel: reference
+                - href: "../../docs/operations/KEY_ROTATION.md"
+                  rel: documentation
+                  text: "Key rotation schedules and emergency revocation procedures"
+                - href: "../../src/gateway/governance/raw_signer_protocol.py"
+                  rel: implementation
+                  text: "RawMessageSigner protocol abstraction"
+                - href: "../../src/gateway/governance/kms_provider.py"
+                  rel: implementation
+                  text: "BaseKMSProvider multi-vendor abstraction"
+
+            - uuid: "3a85d9c6-8e4b-5d72-a0a5-9f6b0e7d4a3b"
+              control-id: si-7
+              description: |
+                Software, firmware, and information integrity is implemented via
+                ConsequenceGateway 6-step post-FRIA evaluation (src/gateway/governance/consequence_gateway.py)
+                introduced in FlowSignal Phase 2. Steps 3-4 recompute the SHA-256
+                digest of the RFC 8785 JCS-canonicalized action payload and compare
+                it to the 'act' claim in the ConsequenceToken. Digest mismatch triggers
+                ACTION_BINDING_MISMATCH rejection, closing the TOCTOU gap where the
+                action payload could be modified between governance evaluation and
+                execution. Step 5 verifies the binding hash (SHA-256 of
+                thread_id:actor_id:action_digest:authority_state_version) matches
+                the consumed marker in Redis, detecting substitution attacks where
+                a different binding is replayed under the same authority record ID.
+                All integrity failures fail closed with BLOCK decision and structured
+                reason codes. The deterministic RFC 8785 JCS canonicalization ensures
+                identical digest computation across Python/Go/JavaScript runtimes,
+                eliminating float-representation and key-ordering drift that could
+                cause spurious integrity check failures. The backward-compatibility
+                remediation (BC-01–BC-08, 2026-08-27) migrated all hash-chain modules
+                (provenance_chain.py, evidence_stream.py, context_accumulator.py) to
+                RFC 8785 JCS with no compatibility shim; previously-signed records will
+                not verify under the current code.
+              props:
+                - name: implementation-status
+                  value: implemented
+                - name: control-origination
+                  value: system-specific
+                - name: phase-2-implementation
+                  value: "true"
+              links:
+                - href: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home?element=SI-7"
+                  rel: reference
+
+    # -----------------------------------------------------------------------
+    # Component 2: NeMo Guardrails (src/gateway/governance/nemo/)
+    # Enforces: SI-10 (Information Input Validation), SI-3 (Malicious Code Protection)
+    # -----------------------------------------------------------------------
+    - uuid: "3d19fa63-7253-4563-b757-23c89ea461ce"
+      title: "NeMo Guardrails"
+      type: software
+      description: >
+        NVIDIA NeMo Guardrails with Microsoft Presidio PII detection providing
+        input/output validation, prompt injection detection, and malicious code
+        protection. Configured via Colang rail definitions and integrated into
+        the governance pipeline through src/gateway/governance/nemo/manager.py.
+      purpose: >
+        Validates all user inputs against 16 PII entity types, detects and blocks
+        prompt injection and jailbreak attempts, and applies content safety rails
+        to both inputs and model outputs. Provides defense-in-depth against
+        adversarial inputs that bypass tier-1 heuristic filtering.
+      responsible-roles:
+        - role-id: provider
+      control-implementations:
+        - uuid: "2de5e59a-f094-4d79-94eb-b3321211b4dc"
+          source: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home"
+          description: "NIST SP 800-53 Rev 5 HIGH-baseline controls implemented by NeMo Guardrails"
+          implemented-requirements:
+            - uuid: "8e46d991-dd78-416a-897d-f909cb63be8d"
+              control-id: si-10
+              description: |
+                Information input validation is implemented via Microsoft Presidio PII detection
+                integrated into NeMo Guardrails. The rail configuration in config/rails/config.yml
+                enables detection of 16 PII entity types including PERSON, EMAIL_ADDRESS,
+                PHONE_NUMBER, US_SSN, CREDIT_CARD, IBAN_CODE, IP_ADDRESS, and more. Colang
+                rail definitions in config/rails/definitions.co enforce input blocking when
+                PII is detected. The NeMo manager in src/gateway/governance/nemo/manager.py
+                orchestrates the validation pipeline. All validation events are tagged with
+                the relevant SP 800-53 control ID and logged to OTel.
+              props:
+                - name: implementation-status
+                  value: implemented
+                - name: control-origination
+                  value: system-specific
+              links:
+                - href: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home?element=SI-10"
+                  rel: reference
+
+            - uuid: "b1f022fc-e7f1-45e6-8972-9f5ab16f99fa"
+              control-id: si-3
+              description: |
+                Malicious code protection is implemented via NeMo Guardrails input/output
+                filtering in src/gateway/governance/nemo/manager.py. The jailbreak detection
+                rail analyzes prompts for known prompt injection patterns, adversarial
+                instructions, and role-confusion attacks. Output rails prevent the model
+                from generating harmful content, code execution instructions, or compliance-
+                violating responses. All detected malicious inputs are blocked, logged, and
+                trigger optional PagerDuty/Slack alerts via the compliance bridge notifier.
+              props:
+                - name: implementation-status
+                  value: implemented
+                - name: control-origination
+                  value: system-specific
+              links:
+                - href: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home?element=SI-3"
+                  rel: reference
+
+    # -----------------------------------------------------------------------
+    # Component 3: FTRA Irreversibility Classifier (src/gateway/governance/ftra/)
+    # Enforces: SI-10 (Input Validation, by delegation), AC-3 (Access Enforcement),
+    #           AC-6 (Least Privilege). Scope: docs/governance/FTRA_SCOPE.md
+    # -----------------------------------------------------------------------
+    - uuid: "ftra0001-4e47-bbc8-irreversibility01"
+      title: "FTRA Irreversibility Classifier"
+      type: software
+      description: >
+        Forward-Looking Trajectory Reachability Analyzer (FTRA, Tier 0.5):
+        classifies each tool call against the active domain's digest-covered
+        terminal registry, records the registry provenance of the classification,
+        and lets a registered terminal clear without a human only inside its
+        signed autonomous envelope. It validates no parameter values; value
+        policy is owned by STPA UCA rules and the domain OPA policy
+        (docs/governance/FTRA_SCOPE.md).
+      purpose: "Irreversibility classification and autonomous-envelope gating for tool execution"
+      responsible-roles:
+        - role-id: provider
+      control-implementations:
+        - uuid: "ftra0001-ctrl-impl-8000-classifier01"
+          source: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home"
+          description: "NIST SP 800-53 Rev 5 HIGH-baseline controls implemented by FTRA Irreversibility Classifier"
+          implemented-requirements:
+            - uuid: "si100001-ftra-8000-classifier00001"
+              control-id: si-10
+              description: |
+                FTRA (Tier 0.5) classifies each tool call against the digest-covered terminal
+                registry (src/gateway/governance/ftra/classifier.py) and routes irreversible or
+                unregistered actions to human review; a registered terminal clears autonomously
+                only inside its signed autonomous envelope with a known, finite, positive
+                magnitude (src/gateway/governance/ftra/autonomy.py). Parameter value validation
+                (SI-10) is enforced by STPA UCA rules (src/cage_finance/stpa/uca_rules.py) and the
+                domain OPA policy (src/cage_finance/opa/trade_governance.rego); injection is
+                mitigated by NeMo/AGP rails generated from UCA-7
+                (config/rails/generated_stpa_rails.co, config/agp/generated_semantic_policy.txt).
+                Before parking a REQUIRE_APPROVAL token for human review, run_pipeline() previews
+                every claiming phase-2 mutating barrier side-effect-free (Phase2Mode.PREVIEW /
+                _preview_mutating in src/gateway/governance/governor/pipeline.py): a HARD barrier
+                breach (such as CBF_BARRIER_VIOLATED) denies the request before a human reviewer
+                is paged (hard_preview_denies_before_hitl in proof/model.py), while a NARROWABLE
+                barrier breach (such as FISCAL_LIMIT_EXCEEDED) records barrier_preview=FAIL and
+                barrier_preview_violations with Violation.bound (src/gateway/governance/contracts.py)
+                on the DeferToken snapshot without holding a Redis reservation across human review
+                time (PREVIEW_IS_PURE). Multi-critic consensus evaluation in
+                src/gateway/governance/consensus/engine.py enforces strict critic vote parsing
+                (_parse_critic_vote), per-critic context_keys parameter allowlisting, RFC 8785
+                canonical JSON parameter delimiting (<params_json>...</params_json>), and pinned
+                gateway prompt fields (role, action, action_type, magnitude) so untrusted agent
+                parameters cannot override critic instructions or induce fail-open vote
+                misinterpretation (POAM-2026-081). The FTRA terminal registry's manifest_sha256
+                (registry_digest in src/gateway/governance/ftra/classifier.py) covers the
+                autonomous_envelope together with the terminals, so a tampered ceiling fails the
+                load-time integrity check; an envelope without a digest, or with a non-finite,
+                non-positive or malformed max_magnitude, refuses to load.
+              props:
+                - name: implementation-status
+                  value: implemented
+                - name: control-origination
+                  value: system-specific
+              links:
+                - href: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home?element=SI-10"
+                  rel: reference
+
+            - uuid: "ac030001-ftra-8000-envelope000001"
+              control-id: ac-3
+              description: |
+                FTRA boundary enforcement (src/gateway/governance/governor/stages/ftra.py) classifies
+                every action against the active domain's signed terminal registry and names the
+                provenance of the decision (FtraBoundaryResult.from_classification in
+                src/gateway/governance/ftra/models.py): FTRA_REGISTERED_IRREVERSIBLE,
+                FTRA_REGISTERED_EXTERNALLY_REVERSIBLE, FTRA_UNREGISTERED_ACTION and
+                FTRA_REGISTRY_ENTRY_INVALID require human approval; FTRA_REGISTRY_UNAVAILABLE
+                (unreadable registry) is a HARD deny. Pre-flight validation
+                (SymbolicGovernor.validate_action in src/gateway/governance/governor/governor.py)
+                runs under Profile.DRY_RUN, mints no seal, and parks REQUIRE_APPROVAL verdicts as
+                DeferReason.HITL_REQUIRED tokens in DeferQueue returning deferred_id. A single
+                committing run executes per trade: execute_trade_action(..., deferred_id=...)
+                invokes SymbolicGovernor.revalidate_post_hitl() under Profile.POST_HITL, which
+                spends the approval atomically via DeferQueue.consume_approval() only when the
+                run seals (a warrant-ineligible DEFER leaves it redeemable) (stage_runs_under
+                in src/gateway/governance/governor/pipeline.py; proved in proof/model.py). Any
+                narrow_hint / narrowed_params attached to REQUIRE_APPROVAL is advisory, dry-run
+                re-verified before surfacing (_reverified_narrow_hint) and re-verified in full by
+                the committing run (_sealed_narrow with issue_narrow_receipt inside
+                ReservationScope).
+              props:
+                - name: implementation-status
+                  value: implemented
+                - name: control-origination
+                  value: system-specific
+              links:
+                - href: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home?element=AC-3"
+                  rel: reference
+
+            - uuid: "ac060001-ftra-8000-envelope000001"
+              control-id: ac-6
+              description: |
+                Least privilege for autonomous action: a registered terminal may proceed without a
+                human only inside the autonomous_envelope its domain registry grants it
+                (src/gateway/governance/ftra/autonomy.py, conditional_clear_reason): a known
+                magnitude with 0 < magnitude <= max_magnitude (finance: 10,000 for execute_trade
+                and execute_trade_bounded) and agent confidence >= confidence.agent_threshold. Unregistered
+                actions, unreadable registries, missing or raising magnitude extractors and
+                unknown magnitudes never clear. The same predicate governs plan reachability
+                (src/gateway/governance/ftra/graph_analyzer.py).
+              props:
+                - name: implementation-status
+                  value: implemented
+                - name: control-origination
+                  value: system-specific
+              links:
+                - href: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home?element=AC-6"
+                  rel: reference
+
+    # -----------------------------------------------------------------------
+    # Component 4: OPA Policy Engine (deployment/system_authz.rego)
+    # Enforces: AC-6 (Least Privilege), AC-3 (Access Enforcement),
+    #           IA-3 (Device Identification and Authentication)
+    # -----------------------------------------------------------------------
+    - uuid: "0ea79813-1236-4a81-a077-71638e3f8627"
+      title: "OPA Policy Engine"
+      type: software
+      description: >
+        Open Policy Agent evaluating Rego policies (deployment/system_authz.rego,
+        src/cage_finance/opa/trade_governance.rego) on
+        every trade execution and governance request. Enforces RBAC role limits,
+        fiscal thresholds, and request authentication. Decision logs are emitted
+        to stdout and captured by Cloud Logging.
+      purpose: >
+        Provides deterministic, auditable policy enforcement independent of the
+        LLM reasoning layer. Least-privilege access and RBAC are enforced via
+        declarative Rego rules. Caller workload authentication happens before
+        the policy layer, by Linkerd mTLS identity at the gateway.
+      responsible-roles:
+        - role-id: provider
+      control-implementations:
+        - uuid: "74b69ba2-d9a3-42d6-ac2d-89e9f88cc2e6"
+          source: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home"
+          description: "NIST SP 800-53 Rev 5 HIGH-baseline controls implemented by OPA"
+          implemented-requirements:
+            - uuid: "d3a6a007-74a4-4c0f-b2ba-d68bb2c395ff"
+              control-id: ac-6
+              description: |
+                Least privilege is enforced via OPA Rego policy in deployment/system_authz.rego.
+                The policy grants permissions based on user role (junior_analyst, senior_analyst,
+                compliance_officer, admin) with graduated fiscal limits: junior analysts are
+                limited to $5,000 per trade and $10,000 daily aggregate; senior analysts to
+                $500,000 and $1,000,000 respectively. Fiscal limit checks in finance_policy.rego
+                enforce per-user-class constraints. Users cannot escalate their own permissions;
+                all role assignments are managed via Kubernetes RBAC and propagated to OPA
+                via environment configuration.
+
+                Workload least privilege: each workload runs as its own Kubernetes
+                service account bound 1:1 to its own GCP service account
+                (infra/targets/gcp-gke/iam.tf, deployment/k8s/service-account.yaml). The
+                advisor, model-serving (vLLM), telemetry and UI workloads hold no KMS
+                signer role; only the gateway signs with gateway-seal (POAM-2026-079
+                closed).
+              props:
+                - name: implementation-status
+                  value: implemented
+                - name: control-origination
+                  value: system-specific
+              links:
+                - href: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home?element=AC-6"
+                  rel: reference
+
+            - uuid: "f919c0a0-f04d-4925-8605-6a759f9ee94e"
+              control-id: ac-3
+              description: |
+                Access enforcement is implemented via OPA allow/deny decisions logged with
+                a full audit trail in deployment/system_authz.rego. Every request is
+                evaluated against the current policy; denied requests are logged with
+                the reason (insufficient_role, fiscal_limit_exceeded, invalid_seal) and
+                returned as structured JSON with HTTP 403. Audit logs include user identity,
+                resource requested, decision outcome, and applicable policy rules. The
+                compliance bridge ingests OPA decision logs into OSCAL Assessment Results.
+              props:
+                - name: implementation-status
+                  value: implemented
+                - name: control-origination
+                  value: system-specific
+              links:
+                - href: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home?element=AC-3"
+                  rel: reference
+                - href: "#a08c55f1-6d12-445d-b4ae-a99c8b573935"
+                  rel: lula
+
+            - uuid: "5f386745-cdda-431b-adec-850cdd899f3e"
+              control-id: ia-3
+              description: |
+                **IA-3 Device Identification and Authentication** is implemented through
+                cryptographic SPIFFE SVID extraction from mTLS substrate across all
+                ingress and inter-service communication paths:
+
+                1. **Kernel-Level Workload Identity Extraction (2026-09-22 Extension)**:
+                   The Linkerd mTLS mesh policy has been extended to all public ingress
+                   agent paths via strict workload identity validation. Under Linkerd mTLS,
+                   the Linkerd inbound proxy terminates TLS and sets `l5d-client-id`
+                   (`<sa>.<ns>.serviceaccount.identity.linkerd.<trust-domain>`). Gateway ingress
+                   authentication and caller identity extraction live in
+                   src/gateway/server/workload_identity.py (`WorkloadIdentityMiddleware` and
+                   `extract_client_identity(scope)`), eliminating header-based identity spoofing
+                   attack surface.
+
+                   Extraction and enforcement functions:
+                   - `WorkloadIdentityMiddleware`: Deny-by-default ASGI middleware enforcing `CAGE_TRUSTED_CLIENT_IDENTITIES` in every environment
+                   - `extract_client_identity(scope)`: FastAPI/Uvicorn inference proxy and gateway caller identity extraction from `l5d-client-id`
+                   - Both validate the Linkerd identity syntax and fail closed on missing or untrusted identities
+
+                   Requests without a verified Linkerd workload identity fail closed (403/401).
+
+                2. **Linkerd Service Mesh mTLS Foundation**:
+                   Linkerd enforces pod-to-pod mutual TLS (mTLS) across all in-cluster
+                   communication (deployment/k8s/linkerd-mtls-policy.yaml). Every pod
+                   receives a SPIFFE ID in the format:
+                   spiffe://<trust-domain>/ns/<namespace>/sa/<service-account>
+
+                3. **Gateway Workload-Identity Ingress Check** (POAM-2026-080):
+                   The gateway trusts the l5d-client-id header set by its Linkerd inbound
+                   proxy after mTLS, and admits only identities in
+                   CAGE_TRUSTED_CLIENT_IDENTITIES (src/gateway/server/workload_identity.py),
+                   which is required and enforced in every environment.
+                   Linkerd identities are DNS-style
+                   (<sa>.<ns>.serviceaccount.identity.linkerd.<trust-domain>). The former
+                   HMAC request seal (CAGE_ROUTING_SEAL_SECRET) is removed.
+
+                4. **Dual-Layer Identity Model**:
+                   Workload SVID authenticates the device/channel (IA-3); OIDC sub identifies
+                   the human operator in shared-console scenarios (IA-2). This separation
+                   enables cryptographically verifiable device authentication independent of
+                   operator identity.
+
+                5. **Compliance Bridge Operator Path**:
+                   The require_operator_identity() function (src/compliance_bridge/auth.py)
+                   extracts SVID from request.attributes.source.principal (gRPC transport) or
+                   Linkerd's proxy-verified l5d-client-id header (converted to a canonical
+                   spiffe:// URI), extending mTLS workload identity to the defer escalation
+                   approval path. Self-asserted x-cage-source-principal headers are rejected.
+
+                BREAKING CHANGE (2026-09-22): Removed X-Agent-ID and X-SPIFFE-ID header
+                parsing. All requests must present a verified Linkerd mTLS workload identity.
+                Anonymous/unauthenticated requests fail closed (403/401).
+              props:
+                - name: implementation-status
+                  value: implemented
+                - name: control-origination
+                  value: system-specific
+                - name: operator-path-extension-date
+                  value: "2026-09-07"
+                - name: spiffe-enforcement-date
+                  value: "2026-09-22"
+                - name: breaking-change
+                  value: "removed X-Agent-ID and X-SPIFFE-ID header parsing; mTLS client certificate required"
+              links:
+                - href: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home?element=IA-3"
+                  rel: reference
+                - href: "../../src/gateway/server/workload_identity.py"
+                  rel: implementation
+                  text: "Gateway workload identity enforcement and extraction (WorkloadIdentityMiddleware, extract_client_identity)"
+                - href: "../../deployment/k8s/linkerd-mtls-policy.yaml"
+                  rel: configuration
+                  text: "Linkerd SPIFFE trust domain and mTLS policy"
+                - href: "../../src/compliance_bridge/auth.py"
+                  rel: implementation
+                  text: "require_operator_identity() SVID extraction for approval path"
+                - href: "../../tests/test_inference_proxy_extended.py"
+                  rel: test
+                  text: "SPIFFE enforcement and fail-closed device authentication tests"
+
+    # -----------------------------------------------------------------------
+    # Component 4: Compliance Bridge (src/compliance_bridge/)
+    # Enforces: CA-7 (Continuous Monitoring), AU-9 / AU-9(3) (Protection of Audit
+    #           Info), AU-10 (Non-Repudiation), AC-6 (Least Privilege),
+    #           IR-6 (Incident Reporting)
+    # -----------------------------------------------------------------------
+    - uuid: "7acccab0-36a0-45d3-adbe-cf31d6cec458"
+      title: "Compliance Bridge"
+      type: software
+      description: >
+        Automated OSCAL audit pipeline providing continuous monitoring, audit
+        information protection, and incident reporting. Runs a 5-step assessment
+        workflow every 6 hours via Kubernetes CronJob. Stores OSCAL Assessment
+        Results to MinIO/GCS and delivers real-time compliance events via SSE
+        and Slack/PagerDuty notifications.
+      purpose: >
+        Operationalizes continuous compliance monitoring by automating the
+        collect-analyze-report cycle. Protects audit integrity through object
+        storage with locking. Ensures security-relevant events are reported to
+        responsible parties within SLA-defined timeframes.
+      responsible-roles:
+        - role-id: provider
+      props:
+        - name: cer-disclosure-capability
+          value: "true"
+        - name: cer-hash-algorithms
+          value: "SHA-256, SHA-512"
+        - name: cer-disclosure-postures
+          value: "PUBLIC, PRIVATE, EMBARGO"
+      control-implementations:
+        - uuid: "43e1c175-3c01-4176-9cf2-8de2549c876d"
+          source: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home"
+          description: "NIST SP 800-53 Rev 5 HIGH-baseline controls implemented by the Compliance Bridge"
+          implemented-requirements:
+            - uuid: "356c3f20-ff82-4a9e-9b62-83c0aa240df1"
+              control-id: ca-7
+              description: |
+                Continuous monitoring is automated via the 5-step audit pipeline in
+                src/compliance_bridge/audit_workflow.py: (1) collect OTel spans from
+                Langfuse, (2) evaluate control safety rates, (3) generate OSCAL Assessment
+                Results, (4) store to MinIO/GCS, (5) alert on failures. The pipeline
+                runs every 6 hours via deployment/k8s/lula-cron.yaml (Kubernetes CronJob).
+                Lula validation manifests in compliance/lula/ provide automated control
+                assertions (lula-validation-au12.yaml, lula-validation-ac3.yaml,
+                lula-validation-ra5.yaml, lula-validation-cm6.yaml, lula-validation-ir6.yaml).
+                Monitoring status is streamed in real-time via src/compliance_bridge/sse_events.py.
+                Formal-model conformance: every governor decision and actuation emits a
+                GOVERNANCE_TRACE evidence event (src/gateway/governance/governor/trace.py), and
+                scripts/check_trace_conformance.py checks an exported stream against
+                proof/model.py (reachability, seal-before-execution, single-use seals). The
+                check runs on demand over exports; it is not yet scheduled.
+              props:
+                - name: implementation-status
+                  value: implemented
+                - name: control-origination
+                  value: system-specific
+              links:
+                - href: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home?element=CA-7"
+                  rel: reference
+                - href: "#1c436570-b67f-4857-bbbf-d1ba683dae25"
+                  rel: lula
+
+            - uuid: "80d95b3a-12ae-4dd4-8db4-b52661335fa4"
+              control-id: au-9
+              description: |
+                Protection of audit information separates the producer of governance
+                evidence from its custodian (POAM-2026-084). The gateway
+                (src/gateway/governance/evidence/stream.py, EvidenceStreamSink) only
+                hash-chains records into a Redis Stream through an atomic Lua
+                compare-and-append, so HA replicas share one linear chain; it holds no
+                evidence signing key, no cold store and no WORM bucket IAM.
+
+                The compliance bridge's EvidenceCustodian
+                (src/compliance_bridge/evidence_custodian.py) independently re-verifies
+                every record hash, prev_hash link and sequence before writing, halts
+                without advancing its durable cursor on any integrity violation, records
+                sequence gaps (entries trimmed before custody) in the batch attestation,
+                and writes NDJSON batches plus attestations with put_if_absent to the
+                retention-locked, CMEK-encrypted GCS WORM bucket (infra/modules/worm_bucket;
+                locked 1 day in staging, 7 years in prod). The cursor advances only after
+                both objects are durable, so a failed write is retried with identical
+                bytes. Under an enforcing posture the bridge refuses to start custody with
+                a null cold store (EvidenceCustodyConfigError). Bucket IAM is scoped to the
+                compliance-bridge service account (roles/storage.objectCreator /
+                objectViewer). OSCAL Assessment Results continue to be stored through
+                src/compliance_bridge/storage.py.
+
+                The ClickHouse query-plane mirror is written by a least-privilege,
+                config-defined user (cage_evidence_sink: INSERT on
+                cage_evidence.evidence_stream only, DDL pinned off by a CONST profile
+                constraint), never the admin user; see the AC-6 statement below.
+
+                Status remains partial until live staging verification of attestations in
+                the WORM bucket closes POAM-2026-084.
+              props:
+                - name: implementation-status
+                  value: partial
+                - name: control-origination
+                  value: hybrid
+                - name: poam-reference
+                  value: "POAM-2026-084"
+              links:
+                - href: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home?element=AU-9"
+                  rel: reference
+                - href: "../../src/compliance_bridge/evidence_custodian.py"
+                  rel: implementation
+                  text: "EvidenceCustodian re-verification, WORM put_if_absent, durable cursor"
+                - href: "../../src/gateway/governance/evidence/stream.py"
+                  rel: implementation
+                  text: "EvidenceStreamSink producer-only compare-and-append"
+                - href: "../../tests/test_evidence_custodian.py"
+                  rel: test
+                  text: "Integrity halt, gap recording, retry-safe cursor, fail-closed config"
+
+            - uuid: "abd3ab8a-f0cf-439c-a0ee-8537cbf42b2b"
+              control-id: au-11
+              description: |
+                Customer responsibility (audit record retention). This statement makes
+                no implementation claim; it records what an adopter must decide.
+
+                CAGE retains governance evidence, including Provider 02 stateHash
+                preimages (STATE_COMMITMENT records), in a retention-locked WORM
+                bucket. The preimages are PII-sanitized, not anonymized
+                (docs/architecture/EVIDENCE_CHAIN.md §4.4 lists the sanitizer's gaps:
+                free-text names, addresses, non-IBAN account numbers, numeric PII and the
+                pseudonymous user_id). The reference defaults in
+                infra/targets/gcp-gke/main.tf are a 7-year locked retention policy in
+                prod, a 1-day locked policy in staging, and an unlocked policy in dev.
+                These are illustrative defaults, not a legal determination.
+
+                Before deploying, the adopting organization must (1) establish the
+                lawful basis and the retention period for audit records in its
+                jurisdiction and set the WORM retention to match before the policy is
+                locked, and (2) determine whether residual personal data in
+                WORM-retained, PII-sanitized evidence falls under an erasure exemption
+                (for example GDPR Art. 17(3)(b) or (e)). If no exemption applies,
+                the organization must decide how erasure requests are met (for example
+                with a shorter retention, or by excluding such data before
+                commitment), because a locked bucket cannot delete objects early.
+              props:
+                - name: control-origination
+                  value: customer-configured
+                - name: responsibility
+                  ns: "https://cage.laah.cybernetics.dev/ns/oscal"
+                  value: customer
+                  class: customer-responsibility
+                - name: poam-reference
+                  value: "POAM-2026-084"
+              links:
+                - href: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home?element=AU-11"
+                  rel: reference
+                - href: "../../infra/targets/gcp-gke/main.tf"
+                  rel: reference
+                  text: "Reference WORM retention defaults (prod 7y locked / staging 1d locked / dev unlocked)"
+                - href: "../../docs/architecture/EVIDENCE_CHAIN.md"
+                  rel: reference
+                  text: "State commitments: sanitizer coverage and known gaps"
+
+            - uuid: "4bc5258d-a69c-4bdf-a40c-a12496cb279b"
+              control-id: au-9.3
+              description: |
+                Cryptographic protection of audit information combines a SHA-256 hash chain
+                over RFC 8785 JCS-canonicalized records (cage-audit/3.0 headers bind
+                chain_id, sequence, trace_id and event_type into each link) with a per-batch
+                cage-evidence-batch/1 attestation signed by the compliance bridge using the
+                dedicated asymmetric Cloud KMS key EVIDENCE_KMS_KEY
+                (infra/targets/gcp-gke/kms_signing.tf, compliance-evidence; signer IAM
+                granted to the compliance-bridge service account only). The attestation
+                covers the chain id, sequence range, first prev_hash, last record_hash,
+                NDJSON SHA-256 and any recorded gap. Under an enforcing posture custody
+                refuses to run without an active signer, and a signing failure writes
+                nothing. Attestations written in dev/test/ci without a signer carry
+                signature_status UNSIGNED and evidentiary false, are stored under a
+                distinct .attestation.unsigned.json key, and are rejected by
+                assert_citable(); they are never evidence for this control.
+              props:
+                - name: implementation-status
+                  value: partial
+                - name: control-origination
+                  value: system-specific
+                - name: poam-reference
+                  value: "POAM-2026-084"
+              links:
+                - href: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home?element=AU-9"
+                  rel: reference
+                - href: "../../src/compliance_bridge/evidence_custodian.py"
+                  rel: implementation
+                  text: "Signed cage-evidence-batch/1 attestations; assert_citable()"
+                - href: "../../src/compliance_bridge/kms_batch_signer.py"
+                  rel: implementation
+                  text: "build_evidence_signer() resolves EVIDENCE_KMS_KEY"
+
+            - uuid: "3513ab15-d8d3-459e-8b2a-e979cfaa2efe"
+              control-id: au-10
+              description: |
+                Non-repudiation of recorded governance evidence rests on the KMS-signed batch
+                attestation. Each attestation binds a contiguous, re-verified range of the
+                hash chain (first/last sequence, first prev_hash, last record_hash, content
+                SHA-256) to the compliance-evidence key, whose private half never leaves
+                Cloud KMS and whose signer role is held only by the compliance-bridge
+                workload identity. Because the gateway that produces the records cannot
+                sign them, and the custodian that signs them cannot author gateway
+                decisions, neither workload alone can fabricate an attested record. The
+                signed body itself asserts evidentiary true. CustodyVerifier
+                (src/compliance_bridge/evidence_verifier.py) reads the archive back and
+                resolves the public key by signature.key_id from trust anchors loaded
+                out-of-band (the EVIDENCE_KMS_KEY provider plus an optional
+                EVIDENCE_TRUST_ANCHORS_FILE for retired versions), never from the
+                attestation, and rejects gateway or reconciler kids. It also binds each
+                attestation to its data object, re-verifies every record, and fails on
+                any undeclared break in chain continuity. Unsigned attestations are
+                non-evidentiary by construction (see AU-9(3)). The compliance-bridge
+                lifespan (src/compliance_bridge/main.py) runs CustodyVerifier.run_forever()
+                on a configurable schedule (EVIDENCE_VERIFY_INTERVAL_S), exports Prometheus
+                counters and gauges (cage_evidence_verification_runs_total,
+                cage_evidence_verified_batches, cage_evidence_verification_failures,
+                cage_evidence_declared_gaps, cage_evidence_non_evidentiary_batches), exposes
+                on-demand verification at GET /v1/evidence/verify, and gates OSCAL Assessment
+                Results citation in src/compliance_bridge/oscal_exporter.py via
+                CustodyVerificationReport.assert_citable().
+              props:
+                - name: implementation-status
+                  value: partial
+                - name: control-origination
+                  value: system-specific
+                - name: poam-reference
+                  value: "POAM-2026-084"
+              links:
+                - href: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home?element=AU-10"
+                  rel: reference
+                - href: "../../src/compliance_bridge/evidence_custodian.py"
+                  rel: implementation
+                  text: "Batch attestation signed with EVIDENCE_KMS_KEY"
+                - href: "../../src/compliance_bridge/evidence_verifier.py"
+                  rel: implementation
+                  text: "CustodyVerifier kid-resolved read-back verification, scheduler, and citation gate"
+                - href: "../../src/compliance_bridge/oscal_exporter.py"
+                  rel: implementation
+                  text: "OSCAL Assessment Results custody citation gate and attestation provenance links"
+                - href: "../../tests/test_evidence_verifier.py"
+                  rel: test
+                  text: "Tamper, deletion, foreign-kid, unknown-kid, citation gate, and endpoint fail-closed paths"
+
+            - uuid: "bd0486b6-1a05-4f64-9784-752c72b2f843"
+              control-id: ac-6
+              description: |
+                The ClickHouse evidence sink (src/compliance_bridge/clickhouse_sink.py)
+                authenticates as cage_evidence_sink, a config-defined ClickHouse user
+                rendered by infra/modules/clickhouse_operator (users.d/evidence_sink_user.xml)
+                and mirrored in deployment/k8s/langfuse-db.yaml. Its only privilege is
+                INSERT on cage_evidence.evidence_stream: no SELECT, ALTER, DROP, TRUNCATE,
+                OPTIMIZE or access management, and no INSERT on evidence_chain_divergence
+                (which would let it mask a divergence verdict). Its settings profile pins
+                allow_ddl=0 and mutations_sync=0 with CONST constraints. Being config-defined,
+                the user cannot be widened or re-keyed through SQL. Its password is generated
+                into the dedicated clickhouse-evidence-sink Secret, mounted only by the
+                ClickHouse server and the compliance bridge; the bridge never receives the
+                admin password. Both Terraform modules reject clickhouse_username "default".
+                Enforced by tests/infrastructure/test_clickhouse_evidence_writer.py.
+              props:
+                - name: implementation-status
+                  value: implemented
+                - name: control-origination
+                  value: system-specific
+              links:
+                - href: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home?element=AC-6"
+                  rel: reference
+                - href: "../../infra/modules/clickhouse_operator/main.tf"
+                  rel: implementation
+                  text: "Config-defined INSERT-only writer and dedicated Secret"
+                - href: "../../tests/infrastructure/test_clickhouse_evidence_writer.py"
+                  rel: test
+                  text: "Least-privilege writer static gate"
+
+            - uuid: "07769d00-7959-4cfe-86aa-972a537952d5"
+              control-id: ir-6
+              description: |
+                Incident reporting is implemented via src/compliance_bridge/notifier.py,
+                which delivers Slack and PagerDuty notifications when control safety rates
+                fall below threshold or critical failures are detected. Real-time security
+                events are streamed to subscribing dashboards via the SSE event bus in
+                src/compliance_bridge/sse_events.py. The notification pipeline triggers
+                on: (1) PII safety_rate < 1.0, (2) overall compliance score < 0.95,
+                (3) Lula validation failures, (4) OPA pod unavailability. Incident tickets
+                include OSCAL control ID, failure evidence, and remediation guidance links.
+              props:
+                - name: implementation-status
+                  value: implemented
+                - name: control-origination
+                  value: system-specific
+              links:
+                - href: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home?element=IR-6"
+                  rel: reference
+                - href: "#bea772cc-5526-49bb-979a-d9be71de5707"
+                  rel: lula
+
+    # -----------------------------------------------------------------------
+    # Component 5: STPA Safety Validator (src/gateway/governance/stpa_validator.py)
+    # Enforces: RA-3 (Risk Assessment), SI-4 (System Monitoring)
+    # -----------------------------------------------------------------------
+    - uuid: "4fd30a2a-c26b-4401-af55-ce57ceab042d"
+      title: "STPA Safety Validator"
+      type: software
+      description: >
+        System-Theoretic Process Analysis (STPA) hazard validator with Control
+        Barrier Function (CBF) real-time monitoring. Performs continuous risk
+        assessment of AI inference outputs and enforces safety envelopes on
+        all governance decisions. Implemented in src/gateway/governance/stpa_validator.py
+        and src/gateway/governance/safety/cbf_engine.py (settlement-aware debit
+        ledger in src/gateway/governance/safety/debit_ledger.py, ADR-010).
+      purpose: >
+        Provides formal safety analysis (STPA) and real-time safety monitoring
+        (CBF) to identify and mitigate unsafe control actions from the AI
+        reasoning layer. Tracks safety envelope violations, escalates to the
+        symbolic governor, and generates evidence for risk assessment documentation.
+      responsible-roles:
+        - role-id: provider
+      control-implementations:
+        - uuid: "a11854f4-c67e-4674-8818-817ed8c4a09a"
+          source: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home"
+          description: "NIST SP 800-53 Rev 5 HIGH-baseline controls implemented by the STPA Safety Validator"
+          implemented-requirements:
+            - uuid: "6020e394-0647-480b-b9e5-2f05b6cb360c"
+              control-id: ra-3
+              description: |
+                Risk assessment is implemented via STPA hazard analysis in
+                src/gateway/governance/stpa_validator.py. The validator identifies
+                unsafe control actions (UCAs) using the STPA methodology: for each
+                control action, it evaluates four UCA types (provided, not-provided,
+                too-early/too-late, stopped-too-soon/applied-too-long). Control Barrier
+                Functions (CBF) in src/gateway/governance/safety/cbf_engine.py define
+                formal discrete-time safety constraints (h(S(t+1)) >= (1 - gamma) h(S(t)))
+                and commit them in one Redis Lua hop with the fence-epoch check. In
+                reconciled mode the hop nets the custodian-attested scalar against the
+                settlement-aware local-debit ledger (cbf:debits, cbf:debits:total in
+                src/gateway/governance/safety/debit_ledger.py): debits are ledgered by
+                debit_id when admitted, retired exactly and idempotently on rollback, and
+                settled by the reconciler (src/gateway/governance/reconciliation/daemon.py)
+                only up to the custodian's signed settled_through minus a clock-skew
+                margin, so the settlement-lag double-spend window is closed (ADR-010,
+                POAM-2026-087). Model risk for execute_trade is assessed by the DoWhy causal
+                gatekeeper (src/gateway/governance/causal/gatekeeper.py) on live telemetry
+                supplied to src/cage_finance/tiers/causal_tier.py by get_telemetry_provider();
+                in enforcing postures every failure is a HARD deny, with distinct codes for
+                a missing feed (CAUSAL_TELEMETRY_UNAVAILABLE) and the bootstrap window below
+                causal.min_samples (CAUSAL_INSUFFICIENT_SAMPLES), and synthetic telemetry is
+                never substituted (POAM-2026-088). Safety parameters (thresholds, envelope
+                bounds) are defined in config/governance_thresholds.json and config/safety_params.json.
+                Risk findings are documented in docs/security/STPA_ANALYSIS.md and tracked
+                in docs/POAM.md.
+              props:
+                - name: implementation-status
+                  value: implemented
+                - name: control-origination
+                  value: system-specific
+              links:
+                - href: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home?element=RA-3"
+                  rel: reference
+                - href: "#1c436570-b67f-4857-bbbf-d1ba683dae25"
+                  rel: lula
+
+            - uuid: "42c2150e-0256-4ef0-b49b-8a7ee847f9cc"
+              control-id: si-4
+              description: |
+                System monitoring is implemented via CBF real-time monitoring of all
+                inference outputs against safety envelopes defined in
+                src/gateway/governance/safety/cbf_engine.py, and by the reconciliation
+                daemon's discrepancy guard (src/gateway/governance/reconciliation/daemon.py),
+                which refuses and fences any custodian snapshot that moves outside the
+                band of the gateway's own state plus its unsettled debits by more than
+                max(reconciliation.discrepancy_ratio x |baseline|,
+                reconciliation.discrepancy_abs_floor). The symbolic governor tracks violations
+                of fiscal limits, content safety thresholds, and STPA-derived constraints
+                on a per-request basis. Safety envelope violations are logged as OTel spans
+                with severity=WARNING or CRITICAL and trigger the compliance bridge alerting
+                pipeline. The automated auditor in scripts/automated_auditor.py performs
+                periodic assessment of monitoring coverage across all controlled components.
+              props:
+                - name: implementation-status
+                  value: implemented
+                - name: control-origination
+                  value: system-specific
+              links:
+                - href: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home?element=SI-4"
+                  rel: reference
+
+    # -----------------------------------------------------------------------
+    # Component 6: GCP/GKE Infrastructure (inherited controls)
+    # Enforces: SC-7 (Boundary Protection), IA-2 (Identification and Auth),
+    #           SC-8 (Transmission Confidentiality and Integrity)
+    # -----------------------------------------------------------------------
+    - uuid: "3014bff4-f8df-4f9f-a957-9aab57e8f87d"
+      title: "GCP/GKE Infrastructure"
+      type: service
+      description: >
+        Google Cloud Platform / Google Kubernetes Engine infrastructure providing
+        inherited security controls. Includes VPC-native GKE networking with
+        Cloud Load Balancer boundary protection, GCP Workload Identity Federation
+        for authentication, and TLS termination at the load balancer for
+        transmission confidentiality. Supplemented by Kubernetes-layer controls
+        defined in deployment/k8s/.
+      purpose: >
+        Provides platform-level inherited security controls that the application
+        components rely upon. Network boundary protection, identity and
+        authentication, and transmission encryption are inherited from the GCP
+        Common Controls Package and supplemented by cluster-level Kubernetes
+        network policies.
+      responsible-roles:
+        - role-id: provider
+      control-implementations:
+        - uuid: "47bd5e3c-7e9f-4006-98e8-dac390437a7e"
+          source: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home"
+          description: "NIST SP 800-53 Rev 5 HIGH-baseline controls inherited from GCP/GKE platform"
+          implemented-requirements:
+            - uuid: "2d27d190-b3da-49f4-bd39-1d4f25f5d20a"
+              control-id: sc-7
+              description: |
+                Boundary protection is inherited from GKE VPC-native networking and
+                Google Cloud Load Balancer. All ingress traffic is routed through the
+                Cloud Load Balancer, which terminates TLS and applies Cloud Armor WAF
+                rules. Kubernetes network policies in deployment/k8s/network-policy.yaml
+                and deployment/k8s/network-policy-hardening.yaml restrict pod-to-pod
+                communication to explicitly declared paths. The compliance namespace is
+                isolated via Kubernetes NetworkPolicy; only the compliance-bridge pod
+                may reach the MinIO/GCS storage endpoints. Pod Security Admission
+                in deployment/k8s/pod-security-admission.yaml enforces restricted policy.
+              props:
+                - name: implementation-status
+                  value: inherited
+                - name: control-origination
+                  value: inherited
+                - name: inherited-from
+                  value: "GCP/GKE Platform — Google Cloud Common Controls Package"
+              links:
+                - href: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home?element=SC-7"
+                  rel: reference
+
+            - uuid: "ca8f96e2-69a3-4d6b-980c-962e73e075d8"
+              control-id: ia-2
+              description: |
+                **IA-2 Identification and Authentication (Organizational Users)** is
+                implemented through multi-layer cryptographic identity extraction:
+
+                1. **GCP/GKE Platform Layer (inherited)**:
+                   Identification and authentication is inherited from GCP Workload Identity
+                   Federation. Each Kubernetes Service Account is bound to a GCP IAM Service
+                   Account via Workload Identity, providing cryptographically verifiable
+                   identity for all pod-level API calls to GCP services. Cluster authentication
+                   is managed via GKE cluster RBAC (deployment/k8s/lula-rbac.yaml,
+                   deployment/k8s/service-account.yaml). Human operator access to the GKE
+                   cluster requires GCP IAM authentication with MFA enforced at the
+                   organizational policy level. GCP Identity-Aware Proxy (IAP) protects
+                   any externally accessible management endpoints.
+
+                2. **Kernel-Level Workload Identity Extraction (2026-09-22 Extension)**:
+                   All public inference and AGW ingress endpoints enforce Linkerd mTLS
+                   workload identity authentication and caller identity extraction (`l5d-client-id`,
+                   `<sa>.<ns>.serviceaccount.identity.linkerd.<trust-domain>`) via
+                   src/gateway/server/workload_identity.py. This provides fail-closed
+                   cryptographic identity verification at the transport/proxy layer, eliminating
+                   header-based identity assertion attack surface.
+
+                   Extraction and enforcement paths:
+                   - `WorkloadIdentityMiddleware`: ASGI ingress middleware enforcing `CAGE_TRUSTED_CLIENT_IDENTITIES` in every environment
+                   - `extract_client_identity(scope)`: FastAPI/Uvicorn inference proxy and gateway caller identity extraction
+
+                   BREAKING CHANGE: Removed X-Agent-ID and X-SPIFFE-ID header parsing.
+                   All requests must present a verified Linkerd mTLS workload identity.
+                   Unauthenticated requests fail closed (403/401).
+
+                3. **Application-Level Operator Identification**:
+                   Human operator identity for defer escalation approval path is extracted via
+                   require_operator_identity() (src/compliance_bridge/auth.py). Identity
+                   precedence is fail-closed and evaluated (not negotiated):
+
+                   a. SPIFFE SVID (primary): Extracted from mTLS client certificate SAN via
+                      Linkerd service mesh. SVID format: spiffe://<trust-domain>/ns/<namespace>/sa/<service-account>.
+                      The identity is populated by the Linkerd inbound proxy into the
+                      l5d-client-id header (or request.attributes.source.principal on gRPC)
+                      and optionally checked against CAGE_TRUSTED_OPERATOR_IDENTITIES.
+                      Principal hash derived via SHA-256 of complete SVID URI.
+
+                   b. OIDC JWT (gated fallback): Only accepted when CAGE_OPERATOR_IDENTITY_ALLOW_OIDC=true.
+                      Identity extracted from JWT 'sub' claim validated via JWKS or upstream middleware.
+                      Principal hash derived via SHA-256 of sub claim value.
+
+                   c. Dev-mode synthetic: Requires dual-condition opt-in (CAGE_ENV=dev AND
+                      CAGE_OPERATOR_IDENTITY_ALLOW_DEV_SYNTHETIC=true). All synthetic principals
+                      carry auth_method="DEV_SYNTHETIC" and reserved urn:cage:dev: prefix
+                      enforcement (line 157-161). Production (CAGE_ENV=prod) never yields
+                      synthetic principals.
+
+                Identity rejection rules: Request-body identity assertion is forbidden
+                (breaking change from prior self-asserted operator_urn/session_id fields
+                removed from DeferEscalateRequest, line 1542). If no valid identity source
+                exists, require_operator_identity() fails closed with HTTP 401 (line 171-175).
+                Identity conflicts (SVID present but parse failure) degrade to next channel
+                with warning logs (line 125-126).
+
+                Principal hash binding: The auth_principal_hash field in ApprovalRecord
+                (src/gateway/governance/defer_queue.py:447, line 1580) is derived from the
+                verified credential subject, not caller-supplied session_id. This hash
+                provides tamper-evident binding between the approval record and the
+                transport-layer authentication substrate.
+
+                4. **Alignment with IA-3 Device Authentication**:
+                   SPIFFE SVID extraction provides dual-layer identity binding: IA-3 (device/workload
+                   via mTLS certificate) and IA-2 (operator via OIDC sub). The kernel-level
+                   SPIFFE extraction (2026-09-22) extends existing workload identity to all
+                   ingress paths, ensuring cryptographic device authentication independent of
+                   operator identity. Workload SVID authenticates the channel
+                (pod-to-pod mTLS via Linkerd); OIDC sub identifies the human operator in
+                shared-console scenarios where multiple operators use the same service account.
+              props:
+                - name: implementation-status
+                  value: implemented
+                - name: control-origination
+                  value: hybrid
+                - name: inherited-from
+                  value: "GCP/GKE Platform — Google Cloud Common Controls Package (workload/cluster identity)"
+                - name: application-level-implementation-date
+                  value: "2026-09-07"
+              links:
+                - href: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home?element=IA-2"
+                  rel: reference
+                - href: "../../src/compliance_bridge/auth.py"
+                  rel: implementation
+                  text: "require_operator_identity() SPIFFE/OIDC extraction"
+                - href: "../../deployment/k8s/linkerd-mtls-policy.yaml"
+                  rel: configuration
+                  text: "Linkerd mTLS SPIFFE trust domain configuration"
+
+            - uuid: "230de322-4b76-4a0d-b07d-267f4fa23769"
+              control-id: sc-8
+              description: |
+                Transmission confidentiality and integrity is inherited from GCP TLS
+                termination at the Cloud Load Balancer. HTTPS is enforced on all ingress
+                via deployment/k8s/ingress.yaml with TLS certificates managed by Google-
+                managed SSL certificates. Internal cluster communication between pods uses
+                Kubernetes service mesh with mTLS enforced at the service level where
+                sensitive data (audit logs, PII detection results) transits the network.
+                The GCP load balancer enforces TLS 1.2 minimum with strong cipher suites.
+                All data in transit to external services (Langfuse, Slack, PagerDuty) uses
+                HTTPS with certificate validation enforced by the HTTP client libraries.
+              props:
+                - name: implementation-status
+                  value: inherited
+                - name: control-origination
+                  value: inherited
+                - name: inherited-from
+                  value: "GCP/GKE Platform — Google Cloud Common Controls Package"
+              links:
+                - href: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home?element=SC-8"
+                  rel: reference
+
+  back-matter:
+    resources:
+      # -----------------------------------------------------------------------
+      # Standards and Frameworks
+      # -----------------------------------------------------------------------
+      - uuid: "34172b73-72d8-4b50-8dd8-0d31a5df3270"
+        title: "NIST SP 800-53 Rev 5 — Security and Privacy Controls"
+        rlinks:
+          - href: "https://csrc.nist.gov/publications/detail/sp/800-53/rev-5/final"
+      - uuid: "2416a563-630a-41e1-9e8f-5b174fc771ac"
+        title: "ISO/IEC 42001:2023 — AI Management System Standard"
+        rlinks:
+          - href: "https://www.iso.org/standard/81230.html"
+      - uuid: "7fab6ccd-37af-4a69-8ef5-2e4f5d1fa440"
+        title: "Lula Compliance Automation Tool"
+        rlinks:
+          - href: "https://github.com/defenseunicorns/lula"
+
+      # -----------------------------------------------------------------------
+      # Internal OSCAL and Compliance Artifacts
+      # -----------------------------------------------------------------------
+      - uuid: "dce38770-251a-497c-886d-2130ff259402"
+        title: "FIPS 199 System Categorization"
+        rlinks:
+          - href: "../../compliance/categorization/FIPS199_CATEGORIZATION.md"
+      - uuid: "21147aee-7c67-4f4c-b25e-bcc6637b5cb3"
+        title: "System Security Plan Outline"
+        rlinks:
+          - href: "../../compliance/ssp/SYSTEM_SECURITY_PLAN_OUTLINE.md"
+
+      # -----------------------------------------------------------------------
+      # ISO 42001 Lula Validation Files (cross-linked from companion definition)
+      # -----------------------------------------------------------------------
+      - uuid: "885abacf-6878-4305-a942-6b96f50175cb"
+        title: "Lula Validation: A.5.2 Social Impact Assessment"
+        rlinks:
+          - href: "../../compliance/lula/lula-validation-a52.yaml"
+      - uuid: "541ad147-6eec-4e35-b906-420c803ff6f0"
+        title: "Lula Validation: A.5.3 Logging and Monitoring"
+        rlinks:
+          - href: "../../compliance/lula/lula-validation-a53.yaml"
+      - uuid: "7ac4f5f2-87ca-4632-a890-fb1ecba65119"
+        title: "Lula Validation: A.9.2 Data Privacy (PII)"
+        rlinks:
+          - href: "../../compliance/lula/lula-validation-a92.yaml"
+      - uuid: "ff18a36b-6dc8-4459-88e8-976fd7c10141"
+        title: "Lula Validation: SC-4 Fiscal Limits (OPA)"
+        rlinks:
+          - href: "../../compliance/lula/lula-validation-sc4.yaml"
+
+      # -----------------------------------------------------------------------
+      # SP 800-53 Lula Validation Stub Files
+      # -----------------------------------------------------------------------
+      - uuid: "a08c55f1-6d12-445d-b4ae-a99c8b573935"
+        title: "Lula Validation: AU-12 / AC-3 Audit and Access"
+        rlinks:
+          - href: "../../compliance/lula/lula-validation-au12.yaml"
+          - href: "../../compliance/lula/lula-validation-ac3.yaml"
+      - uuid: "1c436570-b67f-4857-bbbf-d1ba683dae25"
+        title: "Lula Validation: RA-5 / CA-7 Risk and Monitoring"
+        rlinks:
+          - href: "../../compliance/lula/lula-validation-ra5.yaml"
+          - href: "../../compliance/lula/lula-validation-cm6.yaml"
+      - uuid: "bea772cc-5526-49bb-979a-d9be71de5707"
+        title: "Lula Validation: IR-6 Incident Reporting"
+        rlinks:
+          - href: "../../compliance/lula/lula-validation-ir6.yaml"

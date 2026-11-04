@@ -1,0 +1,382 @@
+# CAGE Compliance & Governance Posture Framework
+**CAGE Version:** v3.0.1
+**Last Evaluated:** 2026-09-29
+
+---
+
+## ⚖️ The Dual-Responsibility Compliance Model
+
+> **CRITICAL CONTEXT FOR AUDITORS:** CAGE provides the built-in technical enforcement controls, automated runtime guardrails, and programmatic evidence generation required to prove compliance. It does **not** automatically grant organizational or certified compliance. Full certification requires institutional audits, independent assessments, and formal administrative authorization.
+
+> **Jurisdictional Architecture:** CAGE deploys to three regions controlled by `CAGE_DEPLOYMENT_REGION`. **ISO 42001** is the **universal baseline** active in all regions. NIST SP 800-53, EU AI Act/GDPR/DORA, and MAS FEAT are **jurisdictional extensions** active only in their respective regions. See [`docs/compliance/cross-region/JURISDICTIONAL_SEPARATION_ANALYSIS.md`](docs/compliance/cross-region/JURISDICTIONAL_SEPARATION_ANALYSIS.md) for the full architectural rationale.
+
+> **Deployment Targets:** The `gcp-gke` deployment target (`infra/targets/gcp-gke/`) is an optional GCP-specific configuration. The `agnostic` deployment target (`infra/targets/agnostic/`) deploys to any Kubernetes 1.24+ cluster without GCP dependencies.
+
+---
+
+> **v3.0.1 Update (2026-09-09):** Compliance reporting now includes Attestation Failure Attributability (POAM-2026-072), Ed25519 CER signature verification for fail-closed security, **STERA Deterministically Bound Refusal** serialization (Full `RefusalReceipt` v3), and mandatory KMS staging/production signing requirements.
+
+## 1. Regulatory Perimeter & Framework Mapping
+
+The Cybernetic Agent Governance Engine (CAGE) splits its internal control framework based on the operational nature of the component being evaluated. Traditional statistical calculations follow strict banking model guidelines, while autonomous LLM workflows are managed under infrastructure and operational resilience standards.
+
+### 1.1 Universal Controls (ISO 42001 — All Deployments)
+
+> **Scope: Universal — applies to ALL `CAGE_DEPLOYMENT_REGION` values (US_FED, EU_ECB, APAC_MAS)**
+
+| System Layer | Component / Routine | Governing Framework | CAGE Control ID | Technical Artifact |
+| --- | --- | --- | --- | --- |
+| **Autonomous Engine** | LLM Routers & Execution Trust Thresholds | **ISO/IEC 42001 §A.5.2** (AI Management System) | `CTRL_AGT_001` | `src/gateway/governance/governor/governor.py` |
+| **Autonomous Engine** | LangGraph SAGA WAL Router + Atomic Rollback Patterns | **ISO/IEC 42001 §A.8.4** | `CTRL_WAL_002` | `src/cage_finance/stpa/saga_nodes.py` |
+| **Autonomous Engine** | DoWhy Live Telemetry Placebo Simulation (50-run loop) | **ISO/IEC 42001 §A.9.4** | `CTRL_TEL_003` | `src/gateway/governance/causal/gatekeeper.py` |
+| **AARM Primitives** | Cryptographic Hash-Chained Context Accumulator | **CSA AARM-V1** · **ISO/IEC 42001 §A.5.3** | `CTRL_CTX_007` | `src/compliance_bridge/context_accumulator.py` |
+| **AARM Primitives** | DEFER State Machine (Confidence-Starvation Boundary) | **CSA AARM-V7** · **ISO/IEC 42001 §A.8.4** | `CTRL_DFR_008` | `src/gateway/governance/defer_queue.py` |
+| **AARM Primitives** | 11-Vector AARM Threat Conformance Report | **CSA AARM v1.0** | `CTRL_AARM_009` | `src/compliance_bridge/aarm_mapper.py` |
+| **Security Gates** | Open Policy Agent (OPA) Guardrail & Constraints | **ISO/IEC 42001 §A.6.1** (Enterprise Policy) | `CTRL_OPA_005` | `src/gateway/governance/governor/stages/opa.py` |
+
+### 1.2 US_FED Only Controls (NIST SP 800-53 / AI 600-1)
+
+> **Scope: US_FED only — applies when `CAGE_DEPLOYMENT_REGION=US_FED`**
+
+| System Layer | Component / Routine | Governing Framework | CAGE Control ID | Technical Artifact |
+| --- | --- | --- | --- | --- |
+| **Statistical Code** | Control Barrier Function ($h(x)$ formula & $\gamma$ decay) | **SR 26-2 §IV.B** (Model Risk Management) | `CTRL_MRM_004` | `src/gateway/governance/safety/cbf_engine.py` |
+| **Statistical Code** | DoWhy Causal Inference Model Graph & Regression Coefficients | **SR 26-2 §IV.B** (Model Risk Management) | `CTRL_MRM_004` | `src/gateway/governance/causal/gatekeeper.py` |
+| **Infrastructure** | GKE Clusters, Workload Identity, Pod Networking | **NIST RMF (SP 800-37)** · **FedRAMP HIGH** | *Out of Code Scope* | `infra/modules/gcp_gke_cluster/` |
+
+> **Note:** SR 26-2 has no legal force outside the US Federal Reserve system. The `EU_ECB_BASELINE.json` and `APAC_MAS_BASELINE.json` profiles suppress SR 26-2 telemetry via the `_NO_LEGAL_FORCE_MARKER` sentinel (see docs/compliance/cross-region/JURISDICTIONAL_SEPARATION_ANALYSIS.md).
+
+### 1.3 EU_ECB Only Controls (EU AI Act / GDPR / DORA)
+
+> **Scope: EU_ECB only — applies when `CAGE_DEPLOYMENT_REGION=EU_ECB`**
+
+| System Layer | Component / Routine | Governing Framework | CAGE Control ID | Technical Artifact |
+| --- | --- | --- | --- | --- |
+| **Autonomous Engine** | `fria` tier — Fundamental Rights Impact Assessment (FRIA) currency + provider validation (phase 1, after `causal`) | **EU AI Act Art. 27** | `CTRL_FRIA_006` | `src/gateway/governance/jurisdiction/eu_ai_act/fria_tier.py` |
+| **Autonomous Engine** | LangGraph SAGA WAL Router (DORA operational resilience) | **DORA Article 12** | `CTRL_WAL_002` | `src/cage_finance/stpa/saga_nodes.py` |
+| **Autonomous Engine** | DoWhy Live Telemetry (DORA ICT continuity) | **DORA Article 10** | `CTRL_TEL_003` | `src/gateway/governance/causal/gatekeeper.py` |
+
+### 1.4 APAC_MAS Only Controls (MAS FEAT / MAS Notice 655 / MAS TRM)
+
+> **Scope: APAC_MAS only — applies when `CAGE_DEPLOYMENT_REGION=APAC_MAS`**
+
+| System Layer | Component / Routine | Governing Framework | CAGE Control ID | Technical Artifact |
+| --- | --- | --- | --- | --- |
+| **Statistical Code** | Control Barrier Function (MAS FEAT fairness boundary) | **MAS FEAT Principles** | `CTRL_MRM_004` | `src/gateway/governance/safety/cbf_engine.py` |
+| **Statistical Code** | DoWhy Causal Inference (MAS FEAT accountability) | **MAS FEAT Principles** | `CTRL_MRM_004` | `src/gateway/governance/causal/gatekeeper.py` |
+
+### 1.5 Summary Mapping for Examiners
+
+| System Layer | Component / Routine | Governing Framework | CAGE Control ID | Technical Artifact | Active Regions |
+| --- | --- | --- | --- | --- | --- |
+| **Statistical Code** | Control Barrier Function ($h(x)$ formula & $\gamma$ decay) | **SR 26-2 §IV.B** <br> (Model Risk Management) | `CTRL_MRM_004` | `src/gateway/governance/safety/cbf_engine.py` | `US_FED`, `APAC_MAS` *(suppressed in EU_ECB)* |
+| **Statistical Code** | DoWhy Causal Inference Model Graph & Regression Coefficients | **SR 26-2 §IV.B** <br> (Model Risk Management) | `CTRL_MRM_004` | `src/gateway/governance/causal/gatekeeper.py` | `US_FED`, `APAC_MAS` *(suppressed in EU_ECB)* |
+| **Autonomous Engine** | LLM Routers & Execution Trust Thresholds | **ISO/IEC 42001 §A.5.2** <br> (AI Management System) | `CTRL_AGT_001` | `src/gateway/governance/governor/governor.py` | *All Regions* |
+| **Autonomous Engine** | LangGraph SAGA WAL Router + Atomic Rollback Patterns | **ISO/IEC 42001 §A.8.4** <br> **DORA Article 12** | `CTRL_WAL_002` | `src/cage_finance/stpa/saga_nodes.py` | *All Regions* |
+| **Autonomous Engine** | DoWhy Live Telemetry Placebo Simulation (50-run loop) | **ISO/IEC 42001 §A.9.4** <br> **DORA Article 10** | `CTRL_TEL_003` | `src/gateway/governance/causal/gatekeeper.py` | *All Regions* |
+| **Autonomous Engine** | `fria` tier — Fundamental Rights Impact Assessment (FRIA) currency + provider validation | **EU AI Act Art. 27** | `CTRL_FRIA_006` | `src/gateway/governance/jurisdiction/eu_ai_act/fria_tier.py` | `EU_ECB` only |
+| **AARM Primitives** | Cryptographic Hash-Chained Context Accumulator | **CSA AARM-V1** <br> **ISO/IEC 42001 §A.5.3** | `CTRL_CTX_007` | `src/compliance_bridge/context_accumulator.py` | *All Regions* |
+| **AARM Primitives** | DEFER State Machine (Confidence-Starvation Boundary) | **CSA AARM-V7** <br> **ISO/IEC 42001 §A.8.4** | `CTRL_DFR_008` | `src/gateway/governance/defer_queue.py` | *All Regions* |
+| **AARM Primitives** | 11-Vector AARM Threat Conformance Report | **CSA AARM v1.0** | `CTRL_AARM_009` | `src/compliance_bridge/aarm_mapper.py` | *All Regions* |
+| **Security Gates** | Open Policy Agent (OPA) Guardrail & Constraints | **ISO/IEC 42001 §A.6.1** <br> (Enterprise Policy) | `CTRL_OPA_005` | `src/gateway/governance/governor/stages/opa.py` | *All Regions* |
+| **AI Safety (US_FED)** | Confabulation / Hallucination Rate Enforcement | **NIST AI 600-1 §2.1** | `CTRL_AGT_001` | `src/gateway/governance/confabulation_scorer.py` | `US_FED` only |
+| **AI Safety (US_FED)** | PII Sanitization & Data Privacy Audit Logging | **NIST AI 600-1 §2.2** | `CTRL_PII_010` | `src/gateway/governance/pii_sanitizer.py` | `US_FED` only |
+| **AI Safety (US_FED)** | Prompt Injection Detection & CausalGatekeeper WAL Integrity | **NIST AI 600-1 §2.3** | `CTRL_WAL_002` | `src/gateway/governance/prompt_injection_detector.py` | `US_FED` only |
+| **AI Safety (US_FED)** | Human-AI Configuration / HITL Escalation (DEFER Queue) | **NIST AI 600-1 §2.5** | `CTRL_DFR_008` | `src/gateway/governance/hitl_escalator.py` | `US_FED` only |
+| **AI Safety (US_FED)** | CBRN Content Filtering (NeMo Guardrails) | **NIST AI 600-1 §2.6 / §2.12** | `CTRL_CBRN_011` | `src/integrations/nemo/colang/cbrn_rails.co` | `US_FED` only *(Cat-M: AO pre-approval required)* |
+| **Infrastructure** | GKE Clusters, Workload Identity, Pod Networking | **NIST RMF (SP 800-37)** <br> **FedRAMP HIGH** | *Out of Code Scope* | `infra/modules/gcp_gke_cluster/` | *Optional — GCP-specific deployment target (`infra/targets/gcp-gke/`); not required for `agnostic` target deployments* |
+
+---
+
+## 2. Mathematical Safety Invariants
+
+The following formal invariants are implemented directly in source code and enforced at runtime on every governance evaluation. Full derivations are in [`docs/architecture/FORMAL_VERIFICATION.md`](docs/architecture/FORMAL_VERIFICATION.md) and [`docs/governance/CAUSAL_AND_CBF_GOVERNANCE.md`](docs/governance/CAUSAL_AND_CBF_GOVERNANCE.md).
+
+### 2.1 Control Barrier Function (CBF)
+
+**Source:** [`src/gateway/governance/safety/cbf_engine.py`](src/gateway/governance/safety/cbf_engine.py) · **Control:** `CTRL_MRM_004`
+
+The safe set is `S = {x ∈ ℝⁿ : h(x) ≥ 0}`. The `ControlBarrierFunction` engine is invariant-parametric: each domain plugin supplies its `InvariantModel` and cost resolver. The finance plugin's `CashBarrier` ([`src/cage_finance/invariants.py`](src/cage_finance/invariants.py)) declares:
+
+```
+h(x) = cash_balance − min_cash_balance
+```
+
+The discrete-time CBF condition enforced at every governance tick:
+
+```
+h(S(t+1)) ≥ (1−γ) · h(S(t)),   γ ∈ (0,1)
+```
+
+This guarantees the cash balance never drops below the minimum threshold in a single step. The decay factor `γ` bounds the maximum permissible drawdown per evaluation cycle. External CBF state reconciliation is implemented via [`src/gateway/governance/reconciliation/daemon.py`](src/gateway/governance/reconciliation/daemon.py) — **POAM-2026-031 closed 2026-07-27**. The reconciler signs each ground-truth snapshot with its own key (`RECONCILER_KMS_KEY`) before the Redis write and aborts the write if signing fails. The CBF verifies snapshots only against the reconciler's public keys via `verify_snapshot_signature()` ([`trust.py`](src/gateway/governance/reconciliation/trust.py)), rejects any gateway-key `kid`, and fails closed on TTL expiry.
+
+> **CBF intra-window hardening:** `ControlBarrierFunction` evaluates the barrier on `effective_state = current_state - self._local_debits`, where `_local_debits` accumulates approved costs since the last verified snapshot. Approved debits are also recorded in the shared Redis list `cbf:local_debits`; after each signed snapshot write, the reconciliation daemon prunes entries at or below the snapshot's sequence with `trim_local_debits_through_sequence_sync()`. This closes the intra-window double-spend gap previously documented as a limitation.
+
+### 2.2 Confabulation Risk Formula
+
+**Source:** [`src/gateway/governance/confabulation_scorer.py`](src/gateway/governance/confabulation_scorer.py) · **Control:** `CTRL_AGT_001`
+
+```
+risk_score = 1.0 − confidence
+```
+
+`is_confabulation_blocked()` blocks below `confidence.min_score` (0.95). Separately, the universal confidence band enforced by `ConfidenceStage` ([`src/gateway/governance/governor/stages/confidence.py`](src/gateway/governance/governor/stages/confidence.py), every region) disposes of the agent's confidence as follows:
+
+| Confidence Range | Action |
+|-------------|--------|
+| ≥ 0.95 (`confidence.agent_threshold`, `get_agent_confidence_threshold()`) | Confidence check clears |
+| [0.70, 0.95) (`confidence.defer_floor`, `get_confidence_defer_floor()`) | `HITL` violation — human approval required |
+| < 0.70 | `DEFERRABLE` violation — routed to the DEFER queue |
+
+### 2.3 Causal Marginal Risk Boundary
+
+**Source:** [`src/gateway/governance/causal/gatekeeper.py`](src/gateway/governance/causal/gatekeeper.py) · **Control:** `CTRL_TEL_003`
+
+A proposed action is blocked when the estimated marginal risk exceeds `causal.risk_boundary` (0.95):
+
+```
+estimated_risk = min(1.0, max(0.0, 0.5 + estimate.value × treatment_value / normalization_scale))
+```
+
+`treatment_value` and `normalization_scale` come from the active domain's `CausalSpec`. DoWhy's `placebo_treatment_refuter` runs **50 simulations**; the world model is treated as untrustworthy (action blocked) when the placebo **p-value < 0.05** (`causal.p_value_threshold`) or **|placebo effect| > 0.2** (`causal.placebo_effect_magnitude`).
+
+### 2.4 FRIA Tier (EU_ECB only)
+
+**Source:** [`src/gateway/governance/jurisdiction/eu_ai_act/fria_tier.py`](src/gateway/governance/jurisdiction/eu_ai_act/fria_tier.py) · **Control:** `CTRL_FRIA_006`
+
+The `fria` tier (`FriaTier`) is contributed by the jurisdiction registry ([`jurisdiction/registry.py`](src/gateway/governance/jurisdiction/registry.py)) only when `CAGE_DEPLOYMENT_REGION=EU_ECB`; it runs in phase 1 right after `causal` and never in POST_HITL. Model confidence plays no part in it (the universal band in §2.2 is a separate, jurisdiction-neutral check).
+
+| Condition | Outcome |
+|----------|---------|
+| FRIA artefact for the action (or system-wide `"*"`) under `CTRL_FRIA_006.assessments` missing, unparseable, timezone-naive, future-dated, or older than `fria.fria_reassessment_interval_days` (365, `config/thresholds/EU_ECB_BASELINE.json`) | HARD `FRIA_ASSESSMENT_STALE` (Art. 27(2)) |
+| `NormativeProvider.validate_fria()` times out (`CAGE_NORMATIVE_GATE_TIMEOUT_SECONDS`, default 5 s), raises, or returns `error` | HARD `FRIA_PROVIDER_UNAVAILABLE` |
+| Provider admits | Pass |
+| Provider refuses with a `needs_human_review: true` finding | HITL `FRIA_EXTERNAL_HOLD` (REQUIRE_APPROVAL token parked) |
+| Provider refuses otherwise | HARD `FRIA_REJECTED` |
+
+An enforcing `EU_ECB` posture refuses to start when the `NormativeProvider` is the stub (`jurisdiction_requirements` check in [`governor/posture.py`](src/gateway/governance/governor/posture.py)).
+
+### 2.5 Fiscal Limit Guard Parameters
+
+**Source:** [`src/cage_finance/safety/fiscal_limit_guard.py`](src/cage_finance/safety/fiscal_limit_guard.py) (`FiscalLimitGuard`; the domain-neutral contract is in [`resource_guard.py`](src/gateway/governance/safety/resource_guard.py)) · **Control:** `CTRL_MRM_004`
+
+| Parameter | Value |
+|-----------|-------|
+| Daily cap | **$500,000** |
+| Rolling window | **86,400 s** (24 h) |
+| Contention strategy | Exponential backoff |
+| Redis failure mode | Fail-closed (blocks request) |
+
+> **Consensus degraded-quorum routing:** The `ERROR + APPROVE` verdict combination is now explicitly routed to `ESCALATE` (HITL) before the catch-all case.
+
+### 2.6 Provenance Hash Chain Integrity
+
+**Source:** [`src/gateway/governance/provenance_chain.py`](src/gateway/governance/provenance_chain.py) · **Control:** `CTRL_CTX_007`
+
+SHA-256 hash chain with O(n) construction:
+
+```
+record_hash[n] = SHA-256(record_hash[n-1] ‖ content_json[n])
+```
+
+Any mutation of node `k` invalidates all hashes for nodes `k … n`, making tampering detectable at O(1) per node during verification.
+
+### 2.7 Routing Seal Integrity
+
+**Source:** [`src/gateway/governance/routing_seal.py`](src/gateway/governance/routing_seal.py) · **Control:** `CTRL_MRM_004`
+
+In production (v3), the routing seal is an asymmetric JWT signed by Cloud KMS HSM (`iss="cage-governance-kernel"`, `aud="cage-execution-engine"`, `exp`, `act`, `ehash`) that cryptographically binds the decision to the compliance evidence stream `record_hash`. The evidence stream acts as the immutable ledger for all **STERA Admissibility Decisions**. When an action fails the STERA gate, it generates a **Deterministically Bound Refusal** (a full 5-part `RefusalReceipt` v3), proving that failures are handled as mathematically constrained containment events rather than standard software exceptions. In local/test environments without KMS, it falls back to a 4-tuple HMAC token:
+
+```
+<expire_ts_hex>.<action_slug>.<record_hash_hex>.<hmac_hex>
+```
+
+TTL: **30 seconds** (`GOVERNANCE_SEAL_TTL_S`). Seals are issued and verified only inside the gateway (`/tools/execute` and `ConsequenceGateway`); unsigned, invalid, or expired seals are refused (fail-closed). Caller authentication at gateway ingress is Linkerd mTLS workload identity, not the routing seal (see §J).
+
+### 2.8 FTRA Reachability Verification Gap (Documented)
+
+> **FTRA verification gap (documented):** Tier 0.5 (FTRA) is not included in the 21-state BFS automaton. This is a documented under-approximation. Gap closure requires integrating FTRA into the state tuple or enforcing it at the controller boundary.
+
+---
+
+## 3. STPA Unsafe Control Actions (UCAs)
+
+**Source:** [`config/stpa_control_structure.yaml`](config/stpa_control_structure.yaml) (kernel UCAs), [`src/cage_finance/config/stpa/trade_hazards.yaml`](src/cage_finance/config/stpa/trade_hazards.yaml) (finance UCAs and safety constraints), thresholds under `domains.finance.stpa` in [`config/governance_thresholds.json`](config/governance_thresholds.json)
+
+The STPA-to-Policy Compiler (`src/gateway/governance/stpa_compiler.py`) ingests the declarative YAML control structures. Kernel UCAs compile to [`config/opa/generated_stpa_policy.rego`](config/opa/generated_stpa_policy.rego) and [`config/rails/generated_stpa_rails.co`](config/rails/generated_stpa_rails.co); finance UCA rules and Saga compensators compile into the finance plugin ([`src/cage_finance/stpa/uca_rules.py`](src/cage_finance/stpa/uca_rules.py), [`src/cage_finance/stpa/saga_nodes.py`](src/cage_finance/stpa/saga_nodes.py)). These artifacts form the design-time configuration that is executed at bind-time by the **STERA (System-Theoretic Execution and Risk Assessment)** admissibility engine, enforcing the following UCA definitions:
+
+| ID | Condition (violation) | Enforcement at HEAD |
+|----|-----------------------|---------------------|
+| **UCA-5** | `drawdown > stpa.uca5_drawdown_threshold_pct` (4.5) on `execute_trade` | Compiled Python rule in `uca_rules.py` → DENY |
+| **UCA-6** | `order_size > stpa.uca6_max_order_volume_fraction (0.01) × daily_vol` on `execute_trade` | Compiled Python rule in `uca_rules.py` → DENY |
+| **FIN-1** (safety constraint) | `sell_percentage > stpa.max_sell_portfolio_fraction` (0.1) on `execute_sell` | Declared constraint only; no compiled artifact |
+| **FIN-2** (safety constraint, refs UCA-2) | `latency_ms > stpa.max_latency_ms` (200) on `execute_trade` | Enforced through the compiled UCA-2 rule |
+
+UCA-5 and UCA-6 also declare `opa` enforcement in `trade_hazards.yaml`, but no compiled Rego at HEAD contains finance UCAs. The finance Saga compensator in `saga_nodes.py` covers UCA-4 (atomic debit/credit failure).
+
+Full STPA hazard analysis (UCAs 1–9, Saga pattern, FiscalLimitGuard): [`docs/security/STPA_ANALYSIS.md`](docs/security/STPA_ANALYSIS.md)
+
+---
+
+## 4. In-Depth Control Implementations
+
+### A. SR 26-2 Model Risk Management Partitioning
+*   **Status:** Strictly Scoped & Partitioned.
+*   **Mechanism:** Traditional, deterministic safety formulas and back-testable statistical structures (the causal regression kernel) are isolated under `CTRL_MRM_004`. CAGE intentionally decouples these from fluid agent workflows, fulfilling the Federal Reserve mandate to apply targeted, rigorous mathematical validation to traditional predictive blocks while shielding them from non-deterministic LLM variance. The discrete-time CBF condition `h(S(t+1)) ≥ (1−γ)·h(S(t))` (see §2.1 above) is the primary mathematical invariant validated under this control.
+*   **Companion Documentation:** For details on mathematical CBF equations and regression validation, see [docs/CAUSAL_AND_CBF_GOVERNANCE.md](docs/governance/CAUSAL_AND_CBF_GOVERNANCE.md) and [docs/STPA_ANALYSIS.md](docs/security/STPA_ANALYSIS.md).
+
+### B. ISO/IEC 42001 & DORA (Digital Operational Resilience Act)
+*   **Status:** Technical Controls Implemented & Observable.
+*   **Mechanism:**
+    *   **Transaction Atomicity (DORA Art. 12):** The LangGraph SAGA Write-Ahead Log (WAL) pattern isolates tool calls and model actions, guaranteeing LIFO (Last-In, First-Out) rollbacks during system or execution faults to prevent partial "ghost states" in ledger positions. A residual **saga-atomicity gap** exists where Tier 3a commitment precedes downstream tier execution; this is addressed by the compensation stub described below.
+
+    *   **Saga compensation stub:** `FiscalLimitGuard.rollback_state(audit_id, amount=..., token=...)` (finance plugin, [`fiscal_limit_guard.py`](src/cage_finance/safety/fiscal_limit_guard.py)) reverses the Redis debit if a downstream tier fails after Tier 3a commitment. This implements the Saga pattern compensation step and closes the residual saga-atomicity gap.
+    *   **Continuous Telemetry Validation (DORA Art. 10):** Real-time Langfuse OpenTelemetry spans are piped through the placebo refuter at runtime to verify that the agent's world-model matches execution reality, rather than drifting on synthetic variables.
+    *   **Tamper-Proof Audit Logging:** All decisions and system exceptions generate a cryptographically hash-chained SHA-256 ledger (`cage-intent/1.0`) to satisfy strict non-repudiation and lifecycle logging policies.
+*   **Companion Documentation:** 
+    *   For detail on the STPA control structure compiling to OPA/NeMo/Saga, see [docs/STPA_ANALYSIS.md](docs/security/STPA_ANALYSIS.md).
+    *   For detailed symbolic governor and hybrid logic flow, see docs/governance/GOVERNANCE_OVERVIEW.md and [docs/governance/NEURO_SYMBOLIC_GOVERNANCE.md](docs/governance/NEURO_SYMBOLIC_GOVERNANCE.md).
+
+### C. European Union AI Act, GDPR, and EBA Hard Law Baseline (EU_ECB Profile)
+*   **Status:** Technical Controls Mapped & Telemetry Attested.
+*   **Mechanism:**
+    *   **Fundamental Rights Impact Assessment (EU AI Act Art. 27):** In `EU_ECB` region, `assemble_governor()` adds the phase-1 `fria` tier (`FriaTier`, `CTRL_FRIA_006`, [`fria_tier.py`](src/gateway/governance/jurisdiction/eu_ai_act/fria_tier.py)) right after `causal`. Every claimed action is refused unless the deployer's FRIA artefact is current (Art. 27(2), `fria.fria_reassessment_interval_days`) and the `NormativeProvider` admits it via `validate_fria()`; an unreachable provider fails closed. See §2.4.
+    *   **Prohibition on Fully Automated Decisions (GDPR Art. 22):** The `EU_ECB` profile automatically scales down maximum trade and confidence thresholds and forces human-in-the-loop validation for any decision carrying legal or significant effect, preventing illegal automated processing.
+    *   **SR 26-2 Telemetry Suppression:** CAGE dynamically suppresses US Fed SR 26-2 telemetry when executing under the `EU_ECB` profile using a data-driven sentinel mechanism. The `EU_ECB_BASELINE.json` encodes `CTRL_MRM_004`'s `legacy_citation` as `"SR 26-2 §IV (US Federal Reserve — no legal force in EU jurisdiction)"`. The `causal_gatekeeper` reads this marker at runtime and emits `primary_framework` (the EBA citation) on OTel spans instead. Adding a new region requires only a JSON profile update — no Python changes.
+    *   **EBA Guidelines Mapping:** Integrates governance metrics directly with internal audit processes per EBA/GL/2023/02 guidelines.
+
+### D. Singapore MAS FEAT Principles Baseline (APAC_MAS Profile)
+*   **Status:** Technical Controls Mapped & Enforced.
+*   **Mechanism:**
+    *   **Fairness, Ethics, Accountability, Transparency (FEAT):** Restricts the agent's parameters to MAS FEAT boundaries, dynamically loading `config/compliance/APAC_MAS_BASELINE.json` to enforce strict operational limits (e.g., SLA latency floor: `175ms`, Consensus: `$8,500`). Ensures full algorithmic accountability and trace transparency in the compliance project trace database.
+
+### E. NIST RMF & FedRAMP HIGH
+*   **Status:** **PARTIAL** (Technical Hardening Complete, Administrative ATO Pending).
+*   **Mechanism:**
+    *   **Zero-Trust Network Hardening:** Deploys Linkerd mTLS with a Google CAS trust anchor (`infra/modules/service_mesh`) for cryptographic workload identity at gateway ingress (**POAM-2026-080**, closed), and GKE Dataplane V2 `NetworkPolicy` plus `FQDNNetworkPolicy` for default-deny egress lockdown in the `gcp-gke` target. TLS 1.2+ enforcement (**POAM-2026-011 / SC-8**) and key rotation lifecycle (**POAM-2026-012 / SC-12**) are closed in [docs/POAM.md](docs/POAM.md).
+    *   **Programmatic Evidence:** The automated script `src/gateway/governance/oscal_ssp_exporter.py` automatically compiles these exact control configurations and implementation narratives into the authoritative 1,449-line Open Security Controls Assessment Language (OSCAL) document on every build pipeline run. OSCAL artifacts are persisted to GCS using the native GCS SDK (boto3 S3-compat fallback) at schema version **OSCAL v1.0.4**.
+    *   **KMS Batch Signing & Read-Back Verification for Audit Evidence:** Compliance evidence batches (covering governance verdicts, `ConsequenceGateway` evaluations, and actuator receipts/refusals via [`ingest_actuation_receipt()`](src/gateway/governance/execution_actuator.py)) are attested by the compliance bridge's `EvidenceCustodian` ([`src/compliance_bridge/evidence_custodian.py`](src/compliance_bridge/evidence_custodian.py)), which re-verifies the hash chain and signs a `cage-evidence-batch/1` attestation with its dedicated `compliance-evidence` key (`EVIDENCE_KMS_KEY`, via [`kms_batch_signer.py`](src/compliance_bridge/kms_batch_signer.py)). Attestations written without a key (dev/test/ci only) are marked non-evidentiary and rejected by `assert_citable()`. The archive is verified on read-back by `CustodyVerifier` ([`src/compliance_bridge/evidence_verifier.py`](src/compliance_bridge/evidence_verifier.py)) on a scheduled loop (`EVIDENCE_VERIFY_INTERVAL_S`, default 300 s), via `GET /v1/evidence/verify`, and before OSCAL citation (`GET /v1/oscal/assessment-results` with `verify_custody=true` or `OSCAL_REQUIRE_VERIFIED_CUSTODY=true`, enabled by default in staging/prod): `kid`-resolved signature check against out-of-band trust anchors (`EVIDENCE_KMS_KEY` + optional `EVIDENCE_TRUST_ANCHORS_FILE`), attestation-to-object binding, record re-verification, and cross-batch continuity; `build_evidence_signer()` and `load_evidence_trust_anchors()` refuse any key shared with the gateway seal (`KMS_GOVERNANCE_KEY`) or reconciler snapshot (`RECONCILER_KMS_KEY`) keys. In the `gcp-gke` target each signing key lives in the `cage-signing-<env>` keyring with key-level IAM only (HSM protection in staging/prod), separate from the symmetric CMEK keyring (**POAM-2026-079**, closed). Artifacts are persisted to the retention-locked GCS WORM bucket (`infra/modules/worm_bucket`, 7-year lock in prod). The private key never leaves the HSM; Cloud Audit Logs provide external, immutable attestation of every signing operation. This constitutes the audit evidence chain for FedRAMP HIGH AU-9 and AU-10.
+
+    *   **KMS replay-attack closure:** `KMSGovernanceSigner.verify()` ([`src/gateway/governance/kms_signer.py`](src/gateway/governance/kms_signer.py)) raises `ValueError` if a payload carries `signed_at` and `now - signed_at > MAX_KMS_PAYLOAD_AGE_SECONDS` (300 s). Under an enforcing posture, software/HMAC signatures are rejected outright (K3).
+    *   **⚠️ Gaps to Authorization:** The CAGE software runtime does not inherently possess an official **Authority to Operate (ATO)**. To close this loop, the parent organization must deploy independent assessors to complete RMF Step 5 (Assess) and Step 6 (Authorize), as well as remediate the remaining open infrastructure POA&M tickets.
+*   **Companion Documentation:** For infrastructure configurations, Linkerd policy files, cryptographic key management, and security posture tracking, see [docs/SECURITY_STATUS.md](docs/security/SECURITY_STATUS.md), [`docs/operations/KEY_ROTATION.md`](docs/operations/KEY_ROTATION.md), and [docs/POAM.md](docs/POAM.md).
+
+### F. Lula Automated Compliance Validation (32 Manifests)
+*   **Status:** Partially Automated.
+*   **Mechanism:** Lula automates OSCAL Assessment Result generation on a 6-hour CronJob schedule (`deployment/k8s/lula-cron.yaml`). There are **32 validation manifests** in `compliance/lula/` covering ISO 42001 (universal), NIST SP 800-53 (US_FED), NIST AI 600-1 (US_FED), EU AI Act/GDPR/DORA (EU_ECB), and MAS FEAT/Notice 655/TRM (APAC_MAS). See [`compliance/lula/README.md`](compliance/lula/README.md) for the full status table and activation instructions.
+
+    **✅ Active (7):**
+    *   `lula-validation-a52.yaml` (ISO 42001 A.5.2, **ALL regions**) — Social impact assessment; NeMo Guardrails toxicity blocking ≥ 99%
+    *   `lula-validation-a53.yaml` (ISO 42001 A.5.3, **ALL regions**) — Logging and monitoring; Langfuse safety rate ≥ 98%
+    *   `lula-validation-a92.yaml` (ISO 42001 A.9.2, **ALL regions**) — Data transfer to suppliers; Presidio PII leak rate = 0%
+    *   `lula-validation-sc4.yaml` (NIST SP 800-53 SC-4, **US_FED only**) — Fiscal limits and RBAC; OPA ConfigMap label present in `governance-stack` namespace
+    *   `lula-validation-sc8.yaml` (NIST SP 800-53 SC-8, **US_FED only**) — Transmission confidentiality / TLS enforcement verified via unit tests in `tests/test_tls_enforcement.py` and Linkerd mTLS manifest annotations
+    *   `lula-validation-ia5.yaml` (NIST SP 800-53 IA-5 / SC-12, **US_FED only**) — Authenticator management / KMS HSM key lifecycle documented in `docs/operations/KEY_ROTATION.md`
+    *   `lula-validation-cilium-dpv2.yaml` (NIST SP 800-53 SC-7, **US_FED only**) — Boundary protection; asserts GKE Dataplane V2 `anetd` DaemonSet is scheduled and all nodes are ready, enforcing eBPF-backed `NetworkPolicy` / `FQDNNetworkPolicy` on Dataplane V2 (`deployment/k8s/cilium/`)
+
+    **🔶 Stub (11)** — NIST SP 800-53 / CSA AARM; logic complete, requires cluster-specific configuration:
+    *   `lula-validation-aarm-vectors.yaml` (CSA AARM v1.0, **ALL regions**) — 11-vector AI agent threat model coverage
+    *   `lula-validation-ac2.yaml` (NIST SP 800-53 AC-2) — Account management / service account lifecycle
+    *   `lula-validation-ac3.yaml` (NIST SP 800-53 AC-3) — Access enforcement / OPA RBAC
+    *   `lula-validation-au12.yaml` (NIST SP 800-53 AU-12) — Langfuse OTLP ingestion availability (standalone OTel Collector deprecated 2026-05-31; validation needs update)
+    *   `lula-validation-cm6.yaml` (NIST SP 800-53 CM-6) — Configuration settings enforcement
+    *   `lula-validation-ia3.yaml` (NIST SP 800-53 IA-3) — Device identification / Linkerd mTLS SPIFFE identity
+    *   `lula-validation-ia5.yaml` (NIST SP 800-53 IA-5) — Authenticator management / KMS HSM key lifecycle
+    *   `lula-validation-ir6.yaml` (NIST SP 800-53 IR-6) — Incident reporting
+    *   `lula-validation-ra5.yaml` (NIST SP 800-53 RA-5) — Vulnerability scanning (pip-audit / Trivy CI)
+    *   `lula-validation-sc8.yaml` (NIST SP 800-53 SC-8) — Transmission confidentiality / TLS enforcement
+    *   `lula-validation-si2.yaml` (NIST SP 800-53 SI-2) — Flaw remediation / CVE patching (pip-audit CI)
+
+    **🔶 Stub (5)** — NIST AI 600-1 (**US_FED only**); Phase 0 scaffolding added 2026-06-15; require Langfuse metric availability and cluster-specific configuration before activation (see [`docs/compliance/us_fed/AI_600_1_IMPLEMENTATION_PLAN.md`](docs/compliance/us_fed/AI_600_1_IMPLEMENTATION_PLAN.md)):
+    *   `lula-validation-ai600-confabulation.yaml` (AI 600-1 §2.1, controls: SI-10, AU-3, POAM AI600-001) — Confabulation / hallucination detection; asserts `confabulation_rate < 0.02` over 24 h window via `confabulation_scorer.py`
+    *   `lula-validation-ai600-data-privacy.yaml` (AI 600-1 §2.2, controls: SI-19, SC-28, POAM AI600-002) — Data privacy / PII sanitization; asserts PII audit log retention ≥ 90 days and Presidio score threshold ≥ 0.5
+    *   `lula-validation-ai600-prompt-injection.yaml` (AI 600-1 §2.3, controls: SI-3, SI-10, CA-8, POAM AI600-003) — Prompt injection detection; asserts injection detector ConfigMap present and deflection score ≥ 4
+    *   `lula-validation-ai600-human-ai-config.yaml` (AI 600-1 §2.5, controls: AC-5, AU-3, CA-7, POAM AI600-005) — Human-AI configuration / HITL escalation; asserts DEFER queue SLA ≤ 4 h for CRITICAL escalations and HITL audit trail present
+    *   `lula-validation-ai600-cbrn.yaml` (AI 600-1 §2.6 / §2.12, controls: SA-12, SR-3, SI-7, POAM AI600-007) — CBRN content filtering; asserts CBRN keyword list ≥ 10 terms enabled and NeMo CBRN rail deployed. **⚠️ Cat-M: requires AO pre-approval before cluster activation.**
+
+### G. NIST AI 600-1 Generative AI Risk Management (US_FED Profile)
+*   **Status:** Phase 0 Scaffolding Complete (2026-06-15). Full assertions target Phase 2–3 per [`docs/compliance/us_fed/AI_600_1_IMPLEMENTATION_PLAN.md`](docs/compliance/us_fed/AI_600_1_IMPLEMENTATION_PLAN.md).
+*   **Jurisdiction:** `US_FED` only (`CAGE_DEPLOYMENT_REGION=US_FED`). NIST AI 600-1 controls are **not** applied to `EU_ECB` or `APAC_MAS` deployments.
+*   **Mechanism:** NIST AI 600-1 ("Artificial Intelligence Risk Management Framework: Generative Artificial Intelligence Profile") defines risk controls specific to generative AI systems. CAGE implements the following AI 600-1 risk domains as runtime controls, each backed by a Lula validation stub:
+
+    | AI 600-1 Section | Risk Domain | CAGE Implementation | Lula Manifest | POAM |
+    | --- | --- | --- | --- | --- |
+    | §2.1 | Confabulation / Hallucination | `confabulation_scorer.py` — confidence gate ≥ 0.95; provenance signing via AgentSight | `lula-validation-ai600-confabulation.yaml` | AI600-001 |
+    | §2.2 | Data Privacy / PII | `pii_sanitizer.py` (Presidio) — PII scrubbed before LLM; CMEK-encrypted audit log | `lula-validation-ai600-data-privacy.yaml` | AI600-002 |
+    | §2.3 | Prompt Injection | `prompt_injection_detector.py` + `causal/gatekeeper.py` WAL integrity | `lula-validation-ai600-prompt-injection.yaml` | AI600-003 |
+    | §2.5 | Human-AI Configuration | `hitl_escalator.py` + `defer_queue.py` — DEFER SLA ≤ 4 h; consensus threshold $10,000 | `lula-validation-ai600-human-ai-config.yaml` | AI600-005 |
+    | §2.6 / §2.12 | CBRN & Value Chain | NeMo `cbrn_rails.co` — Tier-1 keyword list; NeMo CBRN rail deployed | `lula-validation-ai600-cbrn.yaml` | AI600-007 |
+
+*   **Companion Documentation:**
+    *   [`docs/compliance/us_fed/AI_600_1_IMPLEMENTATION_PLAN.md`](docs/compliance/us_fed/AI_600_1_IMPLEMENTATION_PLAN.md) — phased implementation plan (Phase 0–3, Weeks 1–52)
+    *   [`docs/compliance/us_fed/NIST_AI_600_1_US_FED_ANALYSIS.md`](docs/compliance/us_fed/NIST_AI_600_1_US_FED_ANALYSIS.md) — gap analysis and control mapping
+    *   [`compliance/lula/README.md`](compliance/lula/README.md) — full Lula validation status table including AI 600-1 stubs
+
+### H. Continuous Audit Event Loop & Compliance Bridge API (v3.0.1)
+*   **Status:** Implemented & Active.
+*   **Mechanism:** In CAGE v2.0.0, the Compliance Bridge service (`src/compliance_bridge/main.py`) acts as the central hub for automated compliance scoring and threat ledger reporting. It exposes the following REST endpoints:
+    1.  `GET /health` — Kubernetes liveness probe.
+    2.  `GET /v1/controls` — Discovery endpoint; returns the full registry of supported ISO 42001 / NIST controls.
+    3.  `GET /v1/metrics/summary` — Aggregate compliance posture across all supported controls in a single response.
+    4.  `GET /v1/oscal/assessment-results` — Exports current compliance posture as an OSCAL 1.1.2 Assessment Results document.
+    5.  `GET /v1/audit/status/{audit_id}` — Polls the status of a previously submitted audit.
+    6.  `GET /v1/metrics/{control_id}` — Returns compliance metrics for a specific control ID (queried by Lula).
+    7.  `POST /v1/audit/ingest` — Accepts OSCAL Assessment Result YAML from the Lula CronJob, parses, persists to GCS, and ingests into Langfuse.
+    8.  `GET /v1/aarm/conformance-report` — Generates a live 11-vector CSA AARM conformance report with optional vLLM narrative enrichment (Semaphore-controlled rate limit of 3 concurrent calls).
+    9.  `GET /v1/defer/pending` — Lists all pending context-starved execution contexts parked in Redis `db=1` (AARM-V7).
+    10. `POST /v1/defer/{defer_id}/inject` — Resolves deferred tokens by injecting supplementary context data.
+    11. `POST /v1/defer/{defer_id}/escalate` — Escalates deferred tokens to `MANUAL_REVIEW` after TTL expiry (4 hours).
+    12. `GET /v1/prompts/{name}` — Proxy endpoint; fetches Langfuse prompts by name via HTTP.
+    13. `GET /v1/telemetry/history` — Fetches paginated historical compliance telemetry from the Langfuse compliance project.
+    14. `GET /v1/events/stream` — SSE governance event stream consumed by the AgentSight UI KernelDashboard.
+
+### I. Dependency Security — `diskcache` CVE-2025-69872 Remediation
+*   **Status:** Remediated in v2.0.0.
+*   **Mechanism:** **CVE-2025-69872 in `diskcache`** (transitive dependency via `outlines`; `outlines` removed to eliminate the dependency) — a pickle deserialization RCE vulnerability in the `diskcache` package, which was a transitive dependency pulled in by `outlines`. The `outlines` package was removed from all CAGE service dependencies to eliminate `diskcache` from the dependency tree. Structured-output generation previously provided by `outlines` is now handled via vLLM's native JSON-mode API. No CAGE service imports `outlines` or `diskcache` at runtime. The removal is enforced by `pip-audit` and Trivy scans in `.github/workflows/security-scan.yml` (POAM-010 closed). Regulated-environment deployers should verify their own dependency trees do not re-introduce `outlines` via transitive dependencies.
+*   **Compliance Mapping:** NIST SP 800-53 SI-2 (Flaw Remediation); ISO/IEC 42001 §A.9.3 (Supplier Relationships).
+
+### J. Zero-Trust Agent Identity & Egress Credential Brokerage (v3.1.0)
+*   **Status:** Implemented & Active.
+*   **Identity Mechanism:** Agent identity is established cryptographically at the mesh/transport layer under Linkerd mTLS. [`src/gateway/server/workload_identity.py`](src/gateway/server/workload_identity.py) (`WorkloadIdentityMiddleware` and `extract_client_identity(scope)`) validates the Linkerd-verified `l5d-client-id` header (`<sa>.<ns>.serviceaccount.identity.linkerd.<trust-domain>`) against `CAGE_TRUSTED_CLIENT_IDENTITIES` (which is required in every environment). Application-layer identity assertions — `X-Agent-ID` / `X-SPIFFE-ID` headers and body-supplied `agent_id` — are never read on the ingress path, and there is no anonymous fallback: non-open routes fail closed with 403 at `WorkloadIdentityMiddleware`, and [`inference_proxy.py`](src/gateway/server/inference_proxy.py) fails closed with 401 `authentication_required`. A vendor-neutral RFC 9449 `ProofOfPossessionValidator` / `DPoPValidator` ships in [`src/gateway/server/dpop_validator.py`](src/gateway/server/dpop_validator.py) with unit coverage, but is **not yet enforced on any ingress path** — it is available for adopters to wire in.
+*   **A2A Authorization:** Subagent invocation is authorized declaratively. Each catalog entry in `config/agent_catalog.json` declares `authorized_parent_prefixes`; [`config/opa/agent_catalog.rego`](config/opa/agent_catalog.rego) evaluates `startswith(parent_spiffe, prefix)`. Prefix matching keeps ephemeral instance identifiers out of policy bodies, so pod restarts do not register as `POLICY_DRIFT_VIOLATION`.
+*   **Credential Mechanism:** Outbound tool credentials are brokered per dispatch rather than held by adapters. Layer 1 contributes only the `CredentialBrokerAdapter` protocol ([`src/gateway/governance/seams/credential_broker.py`](src/gateway/governance/seams/credential_broker.py)); the Layer 3 reference actuator [`Actuator01Adapter.actuate()`](src/integrations/actuator_01/adapter.py) calls it as a pre-dispatch gate, passing `agent_svid` and `tool_name`, and attaches the returned headers to the outbound request. `CredentialNotFound` and `CredentialAccessDenied` both fail closed — no envelope, no signature, no request. Credential values are masked in logs and absent from the audit record. **Authorization of the SVID is an obligation on the broker implementation, not a kernel-enforced guarantee:** the actuator forwards `clearance.operator_urn` verbatim.
+*   **Evidence:** [`compliance/oscal/sp800-53-component-definition.yaml`](compliance/oscal/sp800-53-component-definition.yaml) (AC-3, IA-2, IA-3) and [`compliance/oscal/system-security-plan.yaml`](compliance/oscal/system-security-plan.yaml) (AC-2, SC-17). Test coverage: [`tests/test_dpop_validator.py`](tests/test_dpop_validator.py), [`tests/test_inference_proxy_extended.py`](tests/test_inference_proxy_extended.py), [`tests/test_execution_actuator_broker.py`](tests/test_execution_actuator_broker.py). POAM-2026-075 (CLOSED 2026-09-22).
+*   **Compliance Mapping:** NIST SP 800-53 AC-2 (Account Management), AC-3 (Access Enforcement), IA-2 (Identification and Authentication), IA-3 (Device Identification and Authentication), SC-17 (PKI Certificates); ISO/IEC 27001:2022 A.9.2.1 / A.9.4.3; ISO/IEC 42001 §A.6 (AI System Lifecycle Controls).
+*   **Canonical Specification:** [`docs/architecture/AGENT_IDENTITY_BINDING_SPEC.md`](docs/architecture/AGENT_IDENTITY_BINDING_SPEC.md).
+
+---
+
+## 5. Automated Posture Enforcement (CI/CD Guardrails)
+
+To guarantee that compliance claims never drift from physical codebase state, permanent regression tests are established in `tests/test_governance_architecture.py` and `tests/test_framework_router.py`.
+
+The **architecture guardrail** ([`tests/test_governance_architecture.py`](tests/test_governance_architecture.py)) scans `src/gateway/governance/**/*.py` on every pull request to enforce:
+1.  **Zero Citation Leakage** (`test_enforce_no_hardcoded_regulatory_strings_in_governance_src`): Prevents literal strings like `"SR 26-2"`, `"SR 11-7"`, or `"ISO 42001"` from being hardcoded into executable files.
+2.  **Authoritative Translation** (`test_control_mappings_json_is_valid`, `test_control_registry_resolves_all_controls_with_legacy_citation`): Runtime regulatory definitions live in `config/control_mappings.json` and the `config/compliance/*_BASELINE.json` regional profiles loaded by `ControlRegistry`.
+3.  **Active Control Verification** (`test_ensure_all_enum_controls_are_referenced_in_source`): Every `GovernanceControl` member's name or `CTRL_*` value must appear somewhere in `src/gateway/governance/` (a textual reference check, not a proof of invocation).
+4.  **Regional Profile Parity** (`test_governance_control_enum_covers_all_registry_keys`): Ensures every `CTRL_*` key across all three regional profiles has a corresponding `GovernanceControl` enum member.
+5.  **Layer Boundary** (`test_consequence_gateway_never_imports_from_integrations`): `consequence_gateway.py` never imports from `src/integrations/`.
+
+The **FrameworkRouter test matrix** ([`tests/test_framework_router.py`](tests/test_framework_router.py), mostly parametrized over the four frameworks) locks down the v2.0.0 Crown Jewel Decoupling:
+1.  **JSON schema integrity** for all four OSCAL routing files (`NIST`, `ISO42001`, `EU_AI_ACT`, `MAS_FEAT`).
+2.  **Cache identity** — `FrameworkRouter.get()` returns identical instance; no double-load on repeated calls.
+3.  **Cache isolation** — loading NIST does not pollute the EU_AI_ACT cache entry.
+4.  **UCA coverage** — UCA-1 through UCA-9 map ≥1 control per framework.
+5.  **No orphaned control IDs** — every referenced control ID has a description entry.
+6.  **Narrative rendering** — `format_narrative()` produces fully rendered prose with no stray `{placeholder}` tokens.
+7.  **Deduplication** — `all_controls()` returns no duplicate control IDs (OSCAL idempotency guarantee).
+8.  **Sentinel suppression** — `_NO_LEGAL_FORCE_MARKER` correctly routes US_FED → legacy citation, EU_ECB/APAC_MAS → `primary_framework` citation.
+
+---
+
+## 📚 Complete Compliance Reference Map
+
+To help you navigate the full regulatory documentation suite:
+
+*   **Executive Overview:** [docs/project/CAGE_ONE_PAGER.md](docs/project/CAGE_ONE_PAGER.md) — 1-page overview of the business case and architecture.
+*   **Detailed Governance Architecture:** docs/governance/GOVERNANCE_OVERVIEW.md — Walkthrough of the 7-tier + FTRA boundary gate SymbolicGovernor and the decoupled abstraction layer.
+*   **System Architecture Spec:** [ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md) — System-wide component structure, database schemas, and request-response pathways.
+*   **Security Posture & Milestones:** [docs/SECURITY_STATUS.md](docs/security/SECURITY_STATUS.md) and [docs/POAM.md](docs/POAM.md) — Precise POAM checklists and NIST RMF coverage tracking.
+*   **STPA & Hazard Analysis:** [docs/STPA_ANALYSIS.md](docs/security/STPA_ANALYSIS.md) — Breakdown of UCAs 1-9 and the STPA-to-Policy compiler specification.
+*   **Causal & CBF Design:** [docs/CAUSAL_AND_CBF_GOVERNANCE.md](docs/governance/CAUSAL_AND_CBF_GOVERNANCE.md) — DoWhy regression kernel placebo refuter and discrete-time CBF mathematics.
+*   **Formal Verification:** [docs/architecture/FORMAL_VERIFICATION.md](docs/architecture/FORMAL_VERIFICATION.md) — Formal verification proofs, CBF invariance, and NoDirectBind proofs.

@@ -1,0 +1,71 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Evidence storage abstractions for vendor-decoupled compliance archival.
+
+This package provides Protocol-based abstractions for evidence cold storage,
+allowing CAGE to decouple from specific cloud vendor SDKs (GCS, S3, etc).
+"""
+
+from .cold_store import (
+    ColdStoreError,
+    ColdStoreHealth,
+    ColdStoreReceipt,
+    EvidenceColdStore,
+)
+from .factory import get_cold_store
+from .null_cold_store import NullColdStore
+from .residency import (
+    MissingBucketConfigError,
+    ResidencyViolationError,
+    resolve_cold_store_bucket,
+)
+from .stream import (
+    ConfigurationError,
+    EvidenceChainCorruptError,
+    EvidenceChainUnavailableError,
+    EvidenceCommitResult,
+    EvidenceRecord,
+    EvidenceStreamSink,
+    current_trace_id,
+    get_evidence_sink,
+    is_evidence_chain_blocking,
+    is_evidence_stream_enabled,
+    validate_evidence_stream_preconditions,
+    verify_record,
+)
+
+__all__ = [
+    "ColdStoreError",
+    "ColdStoreHealth",
+    "ColdStoreReceipt",
+    "ConfigurationError",
+    "EvidenceChainCorruptError",
+    "EvidenceChainUnavailableError",
+    "EvidenceColdStore",
+    "EvidenceCommitResult",
+    "EvidenceRecord",
+    "EvidenceStreamSink",
+    "MissingBucketConfigError",
+    "NullColdStore",
+    "ResidencyViolationError",
+    "current_trace_id",
+    "get_cold_store",
+    "get_evidence_sink",
+    "is_evidence_chain_blocking",
+    "is_evidence_stream_enabled",
+    "resolve_cold_store_bucket",
+    "validate_evidence_stream_preconditions",
+    "verify_record",
+]

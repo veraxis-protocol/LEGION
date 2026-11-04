@@ -1,0 +1,22 @@
+{
+  "schema_version": "veip-authority-authorization/0.1",
+  "environment": "SANDBOX",
+  "authorization_id": "veip-sandbox-authority-authz-2026-10-16",
+  "manifest_issuer": "Veraxis",
+  "generated_at": "2026-10-07T13:59:00Z",
+  "valid_until": "2026-11-07T14:00:00Z",
+  "root_kid": "veip-sandbox-manifest-root-2026-10",
+  "authorizations": [
+    {
+      "kid": "veip-sandbox-issuer-2026-10",
+      "authorized_issuing_authorities": [
+        "Risk Oversight Committee (EU_ECB)"
+      ],
+      "not_before": "2026-10-07T00:00:00Z",
+      "not_after": "2026-11-07T14:00:00Z",
+      "status": "ACTIVE"
+    }
+  ],
+  "authorization_digest": "4b9f2842fe2992aedb483854fde064896c54b96b770721d8b900431c70d36ff5",
+  "signature": "SXwhy1pYrZbnv3VxTwl95KgLOrxZziUxm4t26w4OKjfCxsvfDSleIngfjvz5Ez2EJ-6Mjq2DHxnEq9Pw7y6tAg"
+}

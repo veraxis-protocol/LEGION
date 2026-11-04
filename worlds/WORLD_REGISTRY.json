@@ -1,0 +1,93 @@
+[
+  {
+    "family": "gaia2",
+    "file": "worlds/gaia2/SYN-GAIA-TIM.world.json",
+    "roles": 3,
+    "sha256": "f4cca71f405a9c699296f1ff4cee930adb7599ed608e1f4a629e0406ea02fed5",
+    "world": "SYN-GAIA-TIM"
+  },
+  {
+    "family": "gaia2",
+    "file": "worlds/gaia2/SYN-GAIA-EXE.world.json",
+    "roles": 7,
+    "sha256": "d71c942115261e09bb4a6c35c7bb54b02526aca447c370c0cce52eba05aa7f2b",
+    "world": "SYN-GAIA-EXE"
+  },
+  {
+    "family": "gaia2",
+    "file": "worlds/gaia2/SYN-GAIA-SEA.world.json",
+    "roles": 4,
+    "sha256": "075047890c221b867b75d5f8b39961b1f285caf7d2b10c09781f0cd8454a773c",
+    "world": "SYN-GAIA-SEA"
+  },
+  {
+    "family": "gaia2",
+    "file": "worlds/gaia2/SYN-GAIA-ADA.world.json",
+    "roles": 3,
+    "sha256": "2e2c5d53da3d107fc7a509e6c5121cee5e2a878359fc35a1996c41b71f69e938",
+    "world": "SYN-GAIA-ADA"
+  },
+  {
+    "family": "gaia2",
+    "file": "worlds/gaia2/SYN-GAIA-AMB.world.json",
+    "roles": 3,
+    "sha256": "8b6eb71dffee8cdfba46c0bb8c93205fa10eb245bb63fde9405df65e34cca5d9",
+    "world": "SYN-GAIA-AMB"
+  },
+  {
+    "family": "gaia2",
+    "file": "worlds/gaia2/SYN-GAIA-A2A.world.json",
+    "roles": 3,
+    "sha256": "202250893705b9ad95ace6cdc007db120e66ca4e74b04df7325f3d0d3768b64e",
+    "world": "SYN-GAIA-A2A"
+  },
+  {
+    "family": "gaia2",
+    "file": "worlds/gaia2/SYN-GAIA-NOI.world.json",
+    "roles": 2,
+    "sha256": "10fd648d056d94b7457079737605d9b9be2ed423e410247a7b30a3af4c7ac529",
+    "world": "SYN-GAIA-NOI"
+  },
+  {
+    "family": "opentelemetry",
+    "file": "worlds/opentelemetry/SYN-OTEL-01.world.json",
+    "roles": 4,
+    "sha256": "490b5312e5f380f826b1675602d9cc043aaba78e9d0db5a6dda3183a5ff75580",
+    "world": "SYN-OTEL-01"
+  },
+  {
+    "family": "opentelemetry",
+    "file": "worlds/opentelemetry/SYN-OTEL-02.world.json",
+    "roles": 3,
+    "sha256": "c48026b2f289454be54f6af59296527f706370f2b1ea732c533effaac94a60b1",
+    "world": "SYN-OTEL-02"
+  },
+  {
+    "family": "opentelemetry",
+    "file": "worlds/opentelemetry/SYN-OTEL-03.world.json",
+    "roles": 3,
+    "sha256": "d12b25f42c35e424fc7d69621ef12c0ef84eb359dd4e0a50705b72631766fb6e",
+    "world": "SYN-OTEL-03"
+  },
+  {
+    "family": "opentelemetry",
+    "file": "worlds/opentelemetry/SYN-OTEL-04.world.json",
+    "roles": 12,
+    "sha256": "12d665a0e919e623a3be1172eb379ddc536ddf0eb6b49a05fbeb32c0f58c083c",
+    "world": "SYN-OTEL-04"
+  },
+  {
+    "family": "opentelemetry",
+    "file": "worlds/opentelemetry/SYN-OTEL-05.world.json",
+    "roles": 3,
+    "sha256": "61bdc45a2b50f0db6bca39fce29e7a775169dccfec7006d215c96b7e9c48eb32",
+    "world": "SYN-OTEL-05"
+  },
+  {
+    "family": "opentelemetry",
+    "file": "worlds/opentelemetry/SYN-OTEL-06.world.json",
+    "roles": 3,
+    "sha256": "0c4b2df1577ca262da7ea07cf04619d73bc3e71b145078d3107c6222982a6e47",
+    "world": "SYN-OTEL-06"
+  }
+]

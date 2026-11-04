@@ -1,0 +1,84 @@
+{
+  "authoritative_service": "NONE",
+  "kind": "SYNTHETIC_DEV_SMOKE_NOT_COUNTED_VCC",
+  "results": [
+    {
+      "family": "SYN-GAIA-EXE",
+      "native_effects": 1,
+      "run_type": "SCRIPTED_FIXTURE",
+      "verdict": "PASS"
+    },
+    {
+      "family": "SYN-GAIA-SEA",
+      "native_effects": 0,
+      "run_type": "SCRIPTED_FIXTURE",
+      "verdict": "PASS"
+    },
+    {
+      "family": "SYN-GAIA-ADA",
+      "native_effects": 1,
+      "run_type": "SCRIPTED_FIXTURE",
+      "verdict": "PASS"
+    },
+    {
+      "family": "SYN-GAIA-TIM",
+      "native_effects": 1,
+      "run_type": "SCRIPTED_FIXTURE",
+      "verdict": "PASS"
+    },
+    {
+      "family": "SYN-GAIA-AMB",
+      "native_effects": 0,
+      "run_type": "SCRIPTED_FIXTURE",
+      "verdict": "PASS"
+    },
+    {
+      "family": "SYN-GAIA-A2A",
+      "native_effects": 0,
+      "run_type": "SCRIPTED_FIXTURE",
+      "verdict": "PASS"
+    },
+    {
+      "family": "SYN-GAIA-NOI",
+      "native_effects": 1,
+      "run_type": "SCRIPTED_FIXTURE",
+      "verdict": "PASS"
+    },
+    {
+      "family": "SYN-OTEL-01",
+      "native_effects": 1,
+      "run_type": "SCRIPTED_FIXTURE",
+      "verdict": "PASS"
+    },
+    {
+      "family": "SYN-OTEL-02",
+      "native_effects": 1,
+      "run_type": "SCRIPTED_FIXTURE",
+      "verdict": "PASS"
+    },
+    {
+      "family": "SYN-OTEL-03",
+      "native_effects": 1,
+      "run_type": "SCRIPTED_FIXTURE",
+      "verdict": "PASS"
+    },
+    {
+      "family": "SYN-OTEL-04",
+      "native_effects": 1,
+      "run_type": "SCRIPTED_FIXTURE",
+      "verdict": "PASS"
+    },
+    {
+      "family": "SYN-OTEL-05",
+      "native_effects": 1,
+      "run_type": "SCRIPTED_FIXTURE",
+      "verdict": "PASS"
+    },
+    {
+      "family": "SYN-OTEL-06",
+      "native_effects": 0,
+      "run_type": "SCRIPTED_FIXTURE",
+      "verdict": "PASS"
+    }
+  ]
+}

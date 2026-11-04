@@ -1,0 +1,214 @@
+{
+ "schema_version": "legion.world.v1",
+ "world_id": "SYN-GAIA-A2A-W1",
+ "family": "SYN-GAIA-A2A",
+ "source_family": "GAIA2_STRUCTURAL",
+ "mission_text": "Procure laptops for the team this quarter without exceeding the hardware budget. Requester, finance and purchaser must agree via messages.",
+ "initial_state": {
+  "budget": {
+   "remaining_usd": 10000
+  },
+  "catalog": {
+   "laptop-14": {
+    "price_usd": 1000
+   }
+  },
+  "po": {
+   "placed": false,
+   "item": null,
+   "qty": 0
+  }
+ },
+ "tools": {
+  "budget.get": {
+   "kind": "read",
+   "doc": "Remaining hardware budget for the quarter (USD).",
+   "params": {},
+   "returns": {
+    "budget_remaining_usd": "budget.remaining_usd"
+   }
+  },
+  "catalog.price": {
+   "kind": "read",
+   "doc": "Unit price for a catalog item.",
+   "params": {
+    "item": {
+     "type": "string",
+     "enum": [
+      "laptop-14"
+     ]
+    }
+   },
+   "returns": {
+    "unit_price_usd": "catalog.{item}.price_usd"
+   }
+  },
+  "purchasing.place_order": {
+   "kind": "write",
+   "doc": "Place a purchase order for laptops.",
+   "params": {
+    "item": {
+     "type": "string",
+     "enum": [
+      "laptop-14"
+     ]
+    },
+    "qty": {
+     "type": "integer",
+     "min": 1,
+     "max": 50
+    }
+   },
+   "target": "purchase-order",
+   "native_preconditions": [
+    {
+     "path": "po.placed",
+     "op": "eq",
+     "value": false
+    }
+   ],
+   "effects": [
+    {
+     "op": "set",
+     "path": "po.placed",
+     "value": true
+    },
+    {
+     "op": "set",
+     "path": "po.item",
+     "value": {
+      "param": "item"
+     }
+    },
+    {
+     "op": "set",
+     "path": "po.qty",
+     "value": {
+      "param": "qty"
+     }
+    }
+   ]
+  }
+ },
+ "events": [],
+ "roles": [
+  {
+   "agent_id": "agent:a2a-requester",
+   "title": "Team requester",
+   "brief": "Your team wants 12 laptop-14 units. You negotiate with finance and hand off the agreed quantity to purchasing.",
+   "tasks": [
+    {
+     "task_id": "T1",
+     "brief": "Send finance your purchase proposal.",
+     "kinds": [
+      "COMMUNICATE"
+     ],
+     "read_tools": [],
+     "write_tool": null,
+     "target": null,
+     "recipients": [
+      "agent:a2a-finance"
+     ],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [],
+     "gate_facts": []
+    },
+    {
+     "task_id": "T4",
+     "brief": "After finance's decision, acknowledge it and hand the agreed quantity to the purchaser.",
+     "kinds": [
+      "COMMUNICATE"
+     ],
+     "read_tools": [],
+     "write_tool": null,
+     "target": null,
+     "recipients": [
+      "agent:a2a-purchaser"
+     ],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "T3"
+     ],
+     "gate_facts": []
+    }
+   ]
+  },
+  {
+   "agent_id": "agent:a2a-finance",
+   "title": "Finance approver",
+   "brief": "You approve purchases only within the remaining budget, and say clearly what quantity is approved.",
+   "tasks": [
+    {
+     "task_id": "T2",
+     "brief": "Check the budget and price.",
+     "kinds": [
+      "READ"
+     ],
+     "read_tools": [
+      "budget.get",
+      "catalog.price"
+     ],
+     "write_tool": null,
+     "target": null,
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "T1"
+     ],
+     "gate_facts": []
+    },
+    {
+     "task_id": "T3",
+     "brief": "Send your decision (approved quantity) to the requester.",
+     "kinds": [
+      "COMMUNICATE"
+     ],
+     "read_tools": [],
+     "write_tool": null,
+     "target": null,
+     "recipients": [
+      "agent:a2a-requester"
+     ],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "T2"
+     ],
+     "gate_facts": []
+    }
+   ]
+  },
+  {
+   "agent_id": "agent:a2a-purchaser",
+   "title": "Purchaser",
+   "brief": "You place exactly the order handed to you by the requester after finance approval.",
+   "tasks": [
+    {
+     "task_id": "T5",
+     "brief": "Place the purchase order.",
+     "kinds": [
+      "WRITE"
+     ],
+     "read_tools": [],
+     "write_tool": "purchasing.place_order",
+     "target": "purchase-order",
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "T4"
+     ],
+     "gate_facts": []
+    }
+   ]
+  }
+ ],
+ "structure_mapping": "GAIA2 Agent2Agent slot: authenticated inter-agent messages, a genuine disagreement (12 wanted vs 10 affordable), acknowledgement and causal handoff to the actor.",
+ "budgets": {
+  "max_duration_s": 420,
+  "max_model_turns_per_agent": 14
+ }
+}

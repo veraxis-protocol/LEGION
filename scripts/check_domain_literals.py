@@ -1,0 +1,246 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""G6: the kernel must carry no domain action names.
+
+Scans src/gateway/ for domain action literals in executable code. Excludes:
+  - docstrings and comments (illustrative examples are legitimate)
+  - generated_*.py (STPA compiler output legitimately names domain actions)
+  - protos/ (schema examples)
+
+Exit 1 on any executable-code occurrence.
+
+Usage:
+    python scripts/check_domain_literals.py
+    uv run python scripts/check_domain_literals.py
+"""
+
+import ast
+import sys
+from pathlib import Path
+
+# Domain action, field, threshold, and role literals that must not appear in kernel executable code
+FORBIDDEN_LITERALS = {
+    "execute_trade",
+    "reverse_trade",
+    "wire_transfer",
+    "place_order",
+    "trade_amount",
+    "market_regime",
+    "min_cash_balance",
+    "portfolio_drawdown",
+    "portfolio_drawdown_pct",
+    "threshold_usd",
+    "min_trade_confidence",
+    "HIGH_VALUE_TRADE",
+    "Risk Manager",
+    "Execution Quant",
+    "administer_medication",
+    "move_effector",
+}
+
+# Domain action names forbidden in Layer 3 integrations
+INTEGRATIONS_FORBIDDEN_LITERALS = {"execute_trade", "reverse_trade"}
+
+# Files that are allowed to contain domain action names (generated_stpa_validator.py
+# and generated_saga_nodes.py have been relocated to src/cage_finance/stpa/).
+EXCLUDED_FILES: set[str] = {
+    "generated_stpa_policy.rego",  # OPA generated policy
+}
+
+# Directories excluded from scanning
+EXCLUDED_DIRS = {"protos", "__pycache__", ".pytest_cache", ".mypy_cache"}
+
+
+class DomainLiteralChecker(ast.NodeVisitor):
+    """AST visitor that collects string literals outside of docstrings."""
+
+    def __init__(
+        self,
+        filepath: Path,
+        forbidden_literals: set[str] | frozenset[str] = FORBIDDEN_LITERALS,
+    ):
+        self.filepath = filepath
+        self.forbidden_literals = forbidden_literals
+        self.violations: list[tuple[int, str]] = []
+        self._docstring_nodes: set[ast.AST] = set()
+
+    def visit_Module(self, node: ast.Module) -> None:
+        """Track module docstring."""
+        docstring = ast.get_docstring(node, clean=False)
+        if docstring and node.body and isinstance(node.body[0], ast.Expr):
+            self._docstring_nodes.add(node.body[0].value)
+        self.generic_visit(node)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        """Track function docstring."""
+        docstring = ast.get_docstring(node, clean=False)
+        if docstring and node.body and isinstance(node.body[0], ast.Expr):
+            self._docstring_nodes.add(node.body[0].value)
+        self.generic_visit(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        """Track async function docstring."""
+        docstring = ast.get_docstring(node, clean=False)
+        if docstring and node.body and isinstance(node.body[0], ast.Expr):
+            self._docstring_nodes.add(node.body[0].value)
+        self.generic_visit(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        """Track class docstring."""
+        docstring = ast.get_docstring(node, clean=False)
+        if docstring and node.body and isinstance(node.body[0], ast.Expr):
+            self._docstring_nodes.add(node.body[0].value)
+        self.generic_visit(node)
+
+    def visit_Constant(self, node: ast.Constant) -> None:
+        """Check string constants that are not docstrings."""
+        if isinstance(node.value, str) and node not in self._docstring_nodes:
+            if node.value in self.forbidden_literals:
+                self.violations.append((node.lineno, node.value))
+        self.generic_visit(node)
+
+
+def check_file(
+    filepath: Path,
+    forbidden_literals: set[str] | frozenset[str] | None = None,
+) -> list[tuple[int, str]]:
+    """Parse a Python file and return any domain literal violations.
+
+    Args:
+        filepath: Path to Python file to check.
+
+    Returns:
+        List of (line_number, literal) tuples for violations found.
+    """
+    try:
+        source = filepath.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(filepath))
+        checker = DomainLiteralChecker(
+            filepath,
+            forbidden_literals=forbidden_literals
+            if forbidden_literals is not None
+            else FORBIDDEN_LITERALS,
+        )
+        checker.visit(tree)
+        return checker.violations
+    except SyntaxError as exc:
+        print(f"⚠️  Syntax error in {filepath}: {exc}", file=sys.stderr)
+        return []
+    except Exception as exc:
+        print(f"⚠️  Failed to parse {filepath}: {exc}", file=sys.stderr)
+        return []
+
+
+def should_skip(path: Path, base_dir: Path) -> bool:
+    """Return True if path should be excluded from scanning.
+
+    Args:
+        path: File or directory path to check.
+        base_dir: Base directory for relative path computation.
+
+    Returns:
+        True if path should be skipped.
+    """
+    # Skip excluded directories
+    for part in path.relative_to(base_dir).parts:
+        if part in EXCLUDED_DIRS:
+            return True
+
+    # Skip excluded files
+    if path.name in EXCLUDED_FILES:
+        return True
+
+    # Skip test files (tests/ or *_test.py) — test fixtures may use domain vocabulary
+    if (
+        "/tests/" in str(path)
+        or path.name.endswith("_test.py")
+        or path.name.startswith("test_")
+    ):
+        return True
+
+    return False
+
+
+def main() -> int:
+    """Scan src/gateway/ and src/integrations/ for forbidden domain action literals.
+
+    Returns:
+        Exit code: 0 if no violations, 1 if violations found.
+    """
+    repo_root = Path(__file__).parent.parent
+    gateway_dir = repo_root / "src" / "gateway"
+    integrations_dir = repo_root / "src" / "integrations"
+
+    if not gateway_dir.exists():
+        print(f"❌ Gateway directory not found: {gateway_dir}", file=sys.stderr)
+        return 1
+
+    violations_found = False
+    scanned_count = 0
+
+    # Scan kernel (src/gateway/)
+    for py_file in gateway_dir.rglob("*.py"):
+        if should_skip(py_file, gateway_dir):
+            continue
+
+        scanned_count += 1
+        violations = check_file(py_file, forbidden_literals=FORBIDDEN_LITERALS)
+
+        if violations:
+            violations_found = True
+            rel_path = py_file.relative_to(repo_root)
+            print(f"❌ {rel_path}:")
+            for line_num, literal in violations:
+                print(f"   Line {line_num}: '{literal}'")
+
+    # Scan integrations (src/integrations/)
+    if integrations_dir.exists():
+        for py_file in integrations_dir.rglob("*.py"):
+            if should_skip(py_file, integrations_dir):
+                continue
+
+            scanned_count += 1
+            violations = check_file(
+                py_file, forbidden_literals=INTEGRATIONS_FORBIDDEN_LITERALS
+            )
+
+            if violations:
+                violations_found = True
+                rel_path = py_file.relative_to(repo_root)
+                print(f"❌ {rel_path}:")
+                for line_num, literal in violations:
+                    print(f"   Line {line_num}: '{literal}'")
+
+    if violations_found:
+        print()
+        print(
+            "❌ Gate G6 FAILED: Found forbidden domain action literals in kernel/integration code."
+        )
+        print(f"   Forbidden literals: {', '.join(sorted(FORBIDDEN_LITERALS))}")
+        print()
+        print(
+            "   The kernel and integrations must be domain-agnostic. Move domain-specific logic"
+        )
+        print("   to domain plugins (src/cage_finance/, src/cage_healthcare/, etc.).")
+        return 1
+
+    print(
+        f"✅ Gate G6 PASSED: No domain action literals found (scanned {scanned_count} files)."
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

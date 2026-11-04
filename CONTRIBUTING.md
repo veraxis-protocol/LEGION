@@ -1,0 +1,503 @@
+# Contributing to Cybernetic Governance Engine
+
+Thank you for contributing. This document describes the Git workflow, branch naming conventions, commit message standards, and pull request process for this project.
+
+See also: [AGENTS.md](AGENTS.md) for AI-agent contributor standards and [GIT_WORKFLOW_STANDARDS.md](docs/operations/GIT_WORKFLOW_STANDARDS.md) for detailed branch lifecycle.
+
+---
+
+## Table of Contents
+
+1. [Quick Setup](#quick-setup)
+2. [Branch Naming Conventions](#branch-naming-conventions)
+3. [Commit Message Standard](#commit-message-standard)
+4. [Pull Request Process](#pull-request-process)
+5. [Merge Strategy](#merge-strategy)
+6. [Release & Tagging Process](#release--tagging-process)
+7. [Protected Branches](#protected-branches)
+8. [Container Image Builds](#container-image-builds)
+9. [Architecture Extension Guidelines](#architecture-extension-guidelines)
+
+---
+
+## Quick Setup
+
+After cloning, run the hook installer to enforce commit standards locally:
+
+```bash
+bash scripts/setup_git_hooks.sh
+```
+
+This installs:
+- A **commit message template** (`.gitmessage`) shown in your editor on every `git commit`
+- A **commit-msg hook** that rejects non-Conventional-Commits messages
+- A **pre-push hook** that blocks direct pushes to `main` and `rc-v*` branches
+
+---
+
+## Branch Naming Conventions
+
+| Purpose | Pattern | Example |
+|---|---|---|
+| New feature | `feat/<short-description>` | `feat/redis-rate-limiter` |
+| Bug fix | `fix/<short-description>` | `fix/oscal-uuid-collision` |
+| Documentation | `docs/<short-description>` | `docs/stpa-control-diagram` |
+| Refactor | `refactor/<short-description>` | `refactor/gateway-middleware` |
+| CI / tooling | `ci/<short-description>` | `ci/pin-actions-sha` |
+| Hotfix on release | `hotfix/<version>-<description>` | `hotfix/2.0.1-redis-timeout` |
+| Release candidate | `rc-v<semver>` | `rc-v3.0.1` |
+| Experiment / spike | `spike/<short-description>` | `spike/cbf-formal-proof` |
+| Dependency updates, tooling | `chore/<short-description>` | `chore/update-deps` |
+| Test additions | `test/<short-description>` | `test/cbf-chaos-suite` |
+
+**Rules:**
+- Use lowercase kebab-case only — no underscores, no uppercase
+- Keep descriptions short (≤ 30 chars after the prefix)
+- Delete branches after merge
+
+---
+
+## Commit Message Standard
+
+This project follows [Conventional Commits v1.0.0](https://www.conventionalcommits.org/).
+
+### Format
+
+```
+<type>(<scope>): <short summary>
+
+[optional body]
+
+[optional footer(s)]
+```
+
+### Types
+
+| Type | When to use |
+|---|---|
+| `feat` | A new feature visible to users or operators |
+| `fix` | A bug fix |
+| `docs` | Documentation only |
+| `style` | Formatting, whitespace — no logic change |
+| `refactor` | Code restructuring — no feature or fix |
+| `perf` | Performance improvement |
+| `test` | Adding or correcting tests |
+| `chore` | Build system, dependency updates |
+| `ci` | CI/CD pipeline changes |
+| `revert` | Reverts a previous commit |
+
+### Scopes
+
+Use one of: `gateway`, `compliance`, `infra`, `governance`, `tests`, `docs`, `ci`, `agentsight`, `advisor`, `nemo`, `opa`, `ftra`, `finance`, `healthcare`, `security`, `imports`
+
+### Rules
+
+- Subject line ≤ 72 characters
+- Use imperative mood: "add", not "added" or "adds"
+- No period at end of subject line
+- Separate subject from body with a blank line
+- Body explains **what** and **why**, not how
+- Breaking changes: `!` after type/scope, plus a `BREAKING CHANGE:` footer (both must be present together).
+
+### Examples
+
+```
+feat(gateway): add Redis-backed rate limiter for OPA policy calls
+
+Implements token-bucket rate limiting at the gateway layer to prevent
+OPA from being overwhelmed during burst traffic. Limit is configurable
+via GOVERNANCE_THRESHOLDS_PATH.
+
+Closes #42
+```
+
+```
+fix(compliance): correct OSCAL component UUID collision on re-export
+
+UUIDs were regenerated on every export, breaking idempotency checks
+in the Lula validation pipeline. Now uses deterministic UUID v5
+derived from component name + system identifier.
+```
+
+```
+chore(ci)!: pin actions/checkout to SHA for supply-chain hardening
+
+BREAKING CHANGE: Workflow callers must update their local cache.
+```
+
+---
+
+## Pull Request Process
+
+1. **Branch** from the current integration branch (`rc-v<next>` or `main`)
+2. **Commit** using Conventional Commits (the hook enforces this)
+3. **Push** your branch and open a PR against the integration branch
+4. **Fill in** the PR template completely
+5. **Ensure CI passes** — all checks must be green before merge
+6. **Request review** from at least one maintainer
+7. **Squash-merge** — use "Squash and merge" so each PR becomes one clean commit on the integration branch
+
+### PR Title
+
+The PR title becomes the squash-merge commit message. It must follow Conventional Commits format:
+
+```
+feat(gateway): add Redis rate limiter
+```
+
+---
+
+## Merge Strategy
+
+**Squash merge is the only permitted strategy for all PRs into `main`**, including
+release integration branches (`rc-v<version>`). This applies uniformly regardless
+of scenario:
+
+| Scenario | Strategy |
+|---|---|
+| Feature / fix PR → integration branch | **Squash merge** |
+| Integration branch → `main` (release) | **Squash merge** |
+| Hotfix → `main` + integration branch | **Cherry-pick**, each landing via its own squash-merged PR |
+
+> **Deprecated:** An earlier version of this document described release
+> integration merges as "merge commit (preserves release boundary)". That
+> guidance is superseded — a `squash-merge-guard` CI job
+> (`.github/workflows/ci.yml`) now fails the build on any two-parent merge
+> commit reaching `main`. The release boundary is preserved by the annotated
+> git tag, not by commit topology.
+
+**Never force-push to `main` or `rc-v*` branches.**
+
+---
+
+## Release & Tagging Process
+
+1. Freeze the integration branch (`rc-v<version>`)
+2. Update `CHANGELOG.md` — add release date under the version header
+3. Create an **annotated tag**:
+   ```bash
+   git tag -a v3.0.1 -m "release: v3.0.1 — Cybernetic Governance Engine"
+   git push origin v3.0.1
+   ```
+4. Open a PR from the integration branch into `main` and **squash-merge** it
+   (see [Merge Strategy](#merge-strategy) above — merge commits are not
+   permitted, even for releases)
+5. Create a GitHub Release from the tag, copying the CHANGELOG section as the body
+
+### Tag Format
+
+```
+v<MAJOR>.<MINOR>.<PATCH>[-<pre-release>]
+```
+
+Examples: `v3.0.1`, `v3.0.1-rc.1`, `v3.0.1-dev.1`
+
+---
+
+## Protected Branches
+
+| Branch | Protection |
+|---|---|
+| `main` | No direct push; requires PR + CI green + 1 CODEOWNERS review |
+| `rc-v*` | No direct push; requires PR + CI green |
+| `release/**` | No direct push; requires PR + CI green + 1 CODEOWNERS review |
+
+The local pre-push hook enforces this for `main` and the current integration branch. GitHub branch protection rules enforce it server-side.
+
+### Repository Protection Setup (Maintainer)
+
+The full specification for GitHub repository-level protection settings is in
+[`.github/branch-protection-rules.md`](.github/branch-protection-rules.md).
+Apply these settings when initialising the repository or after any protection
+rule is accidentally removed.
+
+**Quick reference — minimum required GitHub UI settings:**
+
+1. **Settings → Branches → `main`:**
+   - Require pull request (1 approval)
+   - Require review from Code Owners (CODEOWNERS file to be created)
+   - Required status checks: `Lint`, `Pytest Logic Tests`, `Squash Merge Guard`, `Branch Name Validator`, `Marker Contract Check`, `Secret Scanning (Gitleaks)`, `License Guard / license-check`
+   - Require branches to be up to date
+   - Require conversation resolution
+   - Restrict who can push (maintainer only)
+   - Disable force pushes and deletions
+
+2. **Settings → Tags → Protected tags:**
+   - Pattern `v*-ref` → maintainer only
+   - Pattern `v*-cage-*` → maintainer only
+   - Pattern `v[0-9]*` → maintainer only
+
+3. **Settings → Security → Code security and analysis:**
+   - Enable Dependency graph, Dependabot alerts, GitHub Advanced Security
+   - Required to unblock the hard gate in `.github/workflows/dependency-review.yml`
+
+4. **Settings → Actions → General → Workflow permissions:**
+   - Read and write permissions (Releases are created manually via git tag and GitHub UI per GIT_WORKFLOW_STANDARDS.md.)
+
+See [`.github/branch-protection-rules.md`](.github/branch-protection-rules.md)
+for the complete settings table, required status check names, and a
+code-enforcement → GitHub UI mapping.
+
+---
+
+## Container Image Builds
+
+This repo uses a single generic Cloud Build template ([`deployment/docker/cloudbuild.image.yaml`](deployment/docker/cloudbuild.image.yaml)) and a single canonical attestation script ([`scripts/attest_image.sh`](scripts/attest_image.sh)) executed under the dedicated least-privilege Cloud Build identity `cage-cloudbuild-<env>@<project>.iam.gserviceaccount.com` ([`infra/targets/gcp-gke/iam.tf`](infra/targets/gcp-gke/iam.tf)).
+
+### Path A — Single-service build via [`cloudbuild.image.yaml`](deployment/docker/cloudbuild.image.yaml)
+
+| File | Scope | Required Substitutions |
+|---|---|---|
+| [`cloudbuild.image.yaml`](deployment/docker/cloudbuild.image.yaml) | `gateway`, `governed-financial-advisor`, `compliance-bridge`, `nemo-guardrails`, `agentsight-ui`, `cage-opa` | `_IMAGE_NAME`, `_DOCKERFILE`, `_SHORT_SHA` |
+| [`cloudbuild.vllm.yaml`](deployment/docker/cloudbuild.vllm.yaml) | `vllm-streamer` (`E2_HIGHCPU_32`, 40-minute timeout) | `_SHORT_SHA` |
+| [`cloudbuild.lula.yaml`](deployment/docker/cloudbuild.lula.yaml) | `lula` (`0.9.5`) | — |
+
+Every Cloud Build config enforces:
+- `serviceAccount: projects/$PROJECT_ID/serviceAccounts/cage-cloudbuild-${_ENVIRONMENT}@$PROJECT_ID.iam.gserviceaccount.com` — dedicated build identity (POAM-2026-083)
+- `--no-cache` — prevents stale Docker layer cache from masking dependency changes
+- A single immutable `:<_SHORT_SHA>` tag — no mutable `:latest` tag; the SHA tag is the audit-traceable reference required by NIST RMF and ISO 42001
+- [`scripts/attest_image.sh`](scripts/attest_image.sh) — resolves the pushed `@sha256` digest, signs it with `gcloud beta container binauthz attestations sign-and-create` using the `binauthz-attestor` key in `cage-signing-<env>`, and fails closed by verifying the attestation via `gcloud beta container binauthz attestations list`
+- `logging: CLOUD_LOGGING_ONLY` — structured log routing to Cloud Logging (mandatory with a custom Cloud Build SA)
+
+**When to use:** Rebuilding a single service after a targeted change, or when a GCP trigger fires automatically on `main` push.
+
+```bash
+# Rebuild compliance-bridge manually:
+ONLY_IMAGE=compliance-bridge PROJECT_ID=<PROJECT_ID> bash scripts/build_images.sh
+
+# Or invoke the template directly:
+gcloud builds submit --config=deployment/docker/cloudbuild.image.yaml \
+  --project=<PROJECT_ID> \
+  --service-account="projects/<PROJECT_ID>/serviceAccounts/cage-cloudbuild-staging@<PROJECT_ID>.iam.gserviceaccount.com" \
+  --substitutions="_IMAGE_NAME=compliance-bridge,_DOCKERFILE=src/compliance_bridge/Dockerfile,_SHORT_SHA=$(git rev-parse --short HEAD)" .
+```
+
+### Path B — `scripts/build_images.sh` (full-stack fan-out, pre-deploy)
+
+[`scripts/build_images.sh`](scripts/build_images.sh) builds **all first-party services in parallel** (advisor, vLLM streamer, gateway, AgentSight UI, compliance bridge, NeMo Guardrails) by submitting [`deployment/docker/cloudbuild.image.yaml`](deployment/docker/cloudbuild.image.yaml) (and [`deployment/docker/cloudbuild.vllm.yaml`](deployment/docker/cloudbuild.vllm.yaml)) across `name|dockerfile` pairs. It captures the short git SHA from `git rev-parse --short HEAD` (refusing to run outside a git checkout) and on completion invokes [`scripts/render_image_digests.sh`](scripts/render_image_digests.sh) to print the `image_digests = { ... }` HCL map. Set `MIRROR_THIRD_PARTY_IMAGES=true` to also mirror and attest third-party images via [`scripts/mirror_and_attest_images.sh`](scripts/mirror_and_attest_images.sh).
+
+[`deploy_all.sh`](deploy_all.sh) calls this script automatically as a pre-build step before every `gcp-gke` Terraform apply, ensuring images exist before Kubernetes deployments reference them.
+
+**When to use:** Full-stack deploys, CI pre-deploy steps, or when you need all services rebuilt from a clean state.
+
+```bash
+export PROJECT_ID=<your-gcp-project>
+bash scripts/build_images.sh
+```
+
+### Which path takes precedence?
+
+They are **not in conflict** — both submit [`deployment/docker/cloudbuild.image.yaml`](deployment/docker/cloudbuild.image.yaml):
+
+| Concern | Path A (single service) | Path B (`build_images.sh`) |
+|---|---|---|
+| Trigger | `ONLY_IMAGE=<name>` or GCP Console trigger | Developer / `deploy_all.sh` |
+| Scope | One service | All services in parallel |
+| Service account | `cage-cloudbuild-<env>@<project>.iam.gserviceaccount.com` | `cage-cloudbuild-<env>@<project>.iam.gserviceaccount.com` |
+| SHA source | `_SHORT_SHA` substitution (required, no default) | `git rev-parse --short HEAD` (required) |
+| Use case | Targeted single-service rebuild | Full-stack pre-deploy fan-out |
+
+### Adding a new service
+
+1. Create `src/<service>/Dockerfile` with the repo root as build context.
+2. Add `"<service>|src/<service>/Dockerfile"` to `FIRST_PARTY_IMAGES` in [`scripts/build_images.sh`](scripts/build_images.sh) and `<service>` to [`scripts/render_image_digests.sh`](scripts/render_image_digests.sh).
+3. If the service needs an independent GCP Console trigger, point the trigger at [`deployment/docker/cloudbuild.image.yaml`](deployment/docker/cloudbuild.image.yaml) with `_IMAGE_NAME` and `_DOCKERFILE` substitutions.
+
+---
+
+## Development Environment Setup
+
+### Prerequisites
+
+- **Python** ≥ 3.10, < 3.13
+- **[uv](https://docs.astral.sh/uv/)** (recommended package manager) or `pip`
+- **Docker** and **Docker Compose** (for local infrastructure)
+- **Node.js** ≥ 18 and **npm** (for `src/agentsight-ui/` frontend)
+
+### Python Setup
+
+```bash
+# Install uv (if not already installed)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Clone the repository
+git clone https://github.com/google/cybernetic-agent-governance-engine.git
+cd cybernetic-agent-governance-engine
+
+# Install all dependencies including dev extras
+uv sync --all-groups --all-extras
+
+# Configure environment
+cp .env.example .env
+# Edit .env and fill in required values (see README.md for variable descriptions)
+```
+
+### Running Tests
+
+```bash
+# Set up integration test environment (establishes kubectl port-forward tunnels to GKE — NOT for local unit testing)
+bash scripts/setup_test_env.sh
+
+# Run the full unit test suite
+uv run pytest tests/ -m "local or unit" -n auto --dist loadscope --no-cov -p no:langsmith --tb=short
+# Or use: make test-fast
+
+# Run with integration tests (requires a live cluster)
+uv run pytest tests/ --run-integration -v --timeout=120
+
+# Run a specific test file
+uv run pytest tests/test_defer_queue.py -v
+```
+
+### Canonical Makefile Targets
+
+| Target | Purpose |
+|---|---|
+| `make test-fast` | Run local + unit tests across multiple workers |
+| `make test-coverage` | Run tests with coverage reporting (70% minimum) |
+| `make lint` | Ruff linting + lockfile check |
+| `make security` | Bandit SAST + pip-audit + Semgrep |
+| `make docs-check` | Documentation integrity gates — broken links, dangling paths, stale symbols, vendor brand and domain literal leakage (mirrors CI gate G9) |
+| `make update-nemo-configmap` | Sync NeMo Guardrails config to K8s ConfigMap |
+
+### Local Infrastructure (Docker Compose)
+
+```bash
+# Start all services locally (OPA, Gateway, App)
+docker compose up
+
+# Start with hot-reload dev overlay (do NOT use in staging/production)
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+
+# Verify gateway health
+curl http://localhost:8080/health
+```
+
+### Frontend Setup (AgentSight UI)
+
+```bash
+cd src/agentsight-ui
+npm install
+npm run dev
+```
+
+---
+
+## Code Style
+
+### Python
+
+This project uses **[ruff](https://docs.astral.sh/ruff/)** for linting and formatting, and **[mypy](https://mypy-lang.org/)** for type checking.
+
+```bash
+# Lint and auto-fix
+uv run ruff check src/ tests/ --fix
+
+# Format
+uv run ruff format src/ tests/
+
+# Type check
+uv run mypy src/ --ignore-missing-imports
+```
+
+All Python source files under `src/` **must** include the Apache 2.0 license header (see [License Headers](#license-headers) below). The CI `license-check` job enforces this.
+
+### TypeScript / JavaScript
+
+The `src/agentsight-ui/` frontend uses **ESLint** with the config in [`src/agentsight-ui/eslint.config.js`](src/agentsight-ui/eslint.config.js).
+
+```bash
+cd src/agentsight-ui
+npm run lint
+```
+
+### License Headers
+
+All new `.py`, `.ts`, `.tsx`, and `.js` files under `src/` must begin with the Apache 2.0 header:
+
+```python
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+```
+
+Use `scripts/patch_license.py` to add missing headers automatically:
+
+```bash
+uv run python scripts/patch_license.py
+```
+
+---
+
+## Reporting Issues and Security Vulnerabilities
+
+### Bug Reports and Feature Requests
+
+Please use [GitHub Issues](https://github.com/google/cybernetic-agent-governance-engine/issues) to report bugs or request features. When filing a bug report, include:
+
+- A clear description of the problem
+- Steps to reproduce
+- Expected vs. actual behaviour
+- Your environment (OS, Python version, deployment target)
+- Relevant log output or error messages
+
+### Security Vulnerabilities
+
+**Do not report security vulnerabilities through public GitHub issues.**
+
+Please follow the process described in [`SECURITY.md`](SECURITY.md). Security reports are handled with coordinated disclosure and a 5-business-day response SLA.
+
+---
+
+## Contributor License Agreement (CLA)
+
+Contributions to this project must be accompanied by a Contributor License Agreement (CLA). You (or your employer) retain the copyright to your contribution; the CLA gives Google permission to use and redistribute your contributions as part of the project.
+
+If you or your current employer have already signed the Google CLA, no further action is needed. If not, please sign the individual or corporate CLA:
+
+- **Individual CLA:** https://cla.developers.google.com/about/google-individual
+- **Corporate CLA:** https://cla.developers.google.com/about/google-corporate
+
+The CLA is checked automatically on pull requests via the CLA bot. PRs from contributors who have not signed the CLA will be blocked until the CLA is signed.
+
+> **Note:** This is not an officially supported Google product. The CLA requirement applies to contributions to this repository regardless of its support status.
+
+---
+
+## Architecture Extension Guidelines
+
+CAGE provides a domain-agnostic governance kernel (Layer 1) and delegates all domain specifics to optional plugins (Layer 2). When extending the architecture, contributors must adhere to strict boundary rules.
+
+### Implementing a governance tier
+
+A domain or jurisdiction tier subclasses exactly one of the two base classes in [`contracts.py`](src/gateway/governance/contracts.py): `ReadOnlyTier` or `MutatingTier` ([ADR-009](docs/adr/ADR-009-tier-protocol-split.md)). The kind is nominal: a tier never declares `phase`, it is derived from the base class. The governor refuses a tier that subclasses neither, and refuses a `ReadOnlyTier` that defines `commit`, `rollback` or `confirm`. Plugins declare `api_version = "2.0"`.
+
+#### Phase 1: `ReadOnlyTier`
+Phase 1 tiers must be **strictly read-only**. They may inspect the request, query external systems, execute causal refutations, or require human approval, but they **must not** mutate state.
+- `evaluate()` returns `list[Violation]`. An empty list represents allowance; non-empty lists contain structured `Violation` objects. The `SymbolicGovernor` evaluates violations and determines the terminal governance decision.
+- A HARD violation in Phase 1 halts the pipeline immediately, ensuring no Phase 2 mutations occur.
+
+#### Phase 2: `MutatingTier`
+Phase 2 tiers (e.g. the CBF and fiscal tiers) reserve state. They implement `evaluate()` as a side-effect-free preview plus three hooks:
+- `commit()` reserves atomically and returns `(list[Violation], CommitReceipt | None)`. The receipt is not None if and only if state was mutated.
+- `rollback(receipt)` releases the reservation. It runs LIFO if a later Phase 2 tier fails, and after a sealed action that was not carried out.
+- `confirm(receipt)` makes the reservation permanent. It runs only after the actuator accepted the action (`SymbolicGovernor.settle(seal, executed=True)`). A tier whose commit is already final implements it as a no-op.
+- A reservation that is never settled (the process died between seal and actuation) must expire on the tier's own clock.
+
+### Seam Contracts Interface
+
+All integrations and operational tooling (Layer 3) must communicate with the core kernel (Layer 1) exclusively through the seam contracts defined under `src/gateway/governance/seams/`. Direct circular imports into `src/gateway/` are prohibited.
+
+1. **`NormativeProvider`**: Interface for synchronous gate adapters (e.g., retrieving limit baselines, validating dynamic bounds).
+2. **`AttestationProvider`**: Interface for evidence attestation, requiring cryptographic signature verification against a key manifest (e.g., Ed25519 CER checks). Implementations must fail closed on unknown keys.
+3. **`ExecutionActuator`**: Interface for the final dispatch of the `ALLOW` state. Actuators receive the evaluated payload wrapped in a routing seal and must fail closed if the `record_hash` is missing or tampered.

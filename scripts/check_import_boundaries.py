@@ -1,0 +1,640 @@
+#!/usr/bin/env python3
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Import Boundary Enforcement — Gate G3 CI Check
+
+Verifies layer isolation (clean architecture):
+- Layer 1 (src/gateway/) must NOT import from Layer 2 (src/cage_*/)
+- Layer 1 must NOT import from Layer 3 (src/compliance_bridge/)
+- Layer 1 must NOT import from Layer 3 integrations (src/integrations/) at module scope
+  (function-scope lazy imports are permitted only in allowlisted factory modules)
+- Layer 1 must NOT import from Layer 4 (src/governed_financial_advisor/)
+- Evidence kernel (src/gateway/governance/evidence/) must NOT import vendor SDKs:
+  (google.cloud, boto3, botocore, azure, langfuse)
+
+Forward compatibility note:
+    src/gateway/governance/execution_actuator.py is the expected next allowlist entry
+    when ActuatorRegistry lands (will instantiate actuator_01 via lazy factory pattern).
+
+Usage:
+    python scripts/check_import_boundaries.py
+    python scripts/check_import_boundaries.py --verbose
+
+Exit codes:
+    0 - All boundaries respected
+    1 - Boundary violation detected
+"""
+
+import argparse
+import ast
+import re
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+# Layer definitions
+LAYER_1_GATEWAY = Path("src/gateway")
+LAYER_3_INTEGRATIONS = Path("src/integrations")
+EVIDENCE_DIR = Path("src/gateway/governance/evidence")
+
+# Forbidden import patterns for Layer 1
+LAYER_2_CAGE_PATTERN = re.compile(r"^(src\.)?cage_\w+")
+LAYER_3_BRIDGE_PATTERN = re.compile(r"^(src\.)?compliance_bridge")
+LAYER_3_INTEGRATIONS_PATTERN = re.compile(r"^(src\.)?integrations\b")
+LAYER_4_GFA_PATTERN = re.compile(r"^(src\.)?governed_financial_advisor")
+OFFLINE_EVAL_PATTERN = re.compile(r"^(src\.)?eval_harness\b")
+
+# Forbidden vendor SDKs for Layer 1 Kernel (src/gateway/)
+FORBIDDEN_VENDOR_SDKS = (
+    "google.cloud",
+    "boto3",
+    "botocore",
+    "azure",
+    "langfuse",
+    "nemoguardrails",
+    "presidio_analyzer",
+    "presidio_anonymizer",
+)
+
+# Rule 1: Forbidden path literals inside Layer 1 (src/gateway/)
+PATH_LITERAL_PATTERN = re.compile(
+    r"(?:^|/)(?:src/cage_\w+|config/stpa/domains(?:/|$))|^cage_(?:finance|healthcare|physical_ai)\b"
+)
+
+# Rule 2: Forbidden domain action / field / role literals inside Layer 1 (src/gateway/)
+FORBIDDEN_DOMAIN_LITERALS = frozenset(
+    {
+        "execute_trade",
+        "reverse_trade",
+        "wire_transfer",
+        "place_order",
+        "trade_amount",
+        "trader_role",
+        "market_regime",
+        "balance_usd",
+        "min_cash_balance",
+        "portfolio_drawdown",
+        "portfolio_drawdown_pct",
+        "threshold_usd",
+        "min_trade_confidence",
+        "HIGH_VALUE_TRADE",
+        "Risk Manager",
+        "Execution Quant",
+        "administer_medication",
+        "move_effector",
+    }
+)
+
+# Rule 3: Forbidden class / function definitions inside Layer 1 (src/gateway/)
+FORBIDDEN_KERNEL_DEFINITIONS = frozenset(
+    {
+        "TradingKnowledgeGraph",
+        "FiscalGuard",
+        "FiscalLimitGuard",
+        "AmountNarrower",
+        "GCPKMSProvider",
+        "AWSKMSProvider",
+        "AzureKMSProvider",
+        "PlaidLedgerProvider",
+        "AnchorageLedgerProvider",
+        "GcsLedgerSnapshotProvider",
+        "S3LedgerSnapshotProvider",
+        "StubLedgerProvider",
+        "generate_mock_telemetry",
+    }
+)
+
+# Allowlist for function-scope lazy imports of src.integrations in Layer 1
+# These factory modules may lazy-load vendor adapters at instantiation time.
+# Adding an entry requires deliberate architectural review — keep this small.
+INTEGRATIONS_FACTORY_ALLOWLIST = frozenset(
+    [
+        "src/gateway/governance/normative_provider.py",  # lazy-loads provider_01/03/06
+        "src/gateway/governance/estate_provider.py",  # lazy-loads provider_09
+        "src/gateway/governance/evidence/factory.py",  # lazy-loads storage_gcs/storage_s3
+        "src/compliance_bridge/main.py",  # lazy-loads provider_02.cer_index (B6 CER wiring)
+        "src/gateway/governance/attestation_aggregator.py",  # lazy-loads provider_02/provider_05
+        "src/gateway/governance/warrant/source_factory.py",  # lazy-loads provider_05 warrant source
+        "src/gateway/governance/execution_actuator.py",  # lazy-loads actuator_01/02/03
+        "src/gateway/governance/quarantine_actuator.py",  # lazy-loads actuator_03
+        "src/gateway/governance/outbound_credential_factory.py",  # lazy-loads gcp/aws/azure credential providers
+        "src/gateway/governance/signer_factory.py",  # lazy-loads gcp/aws/azure KMS providers
+        "src/gateway/governance/telemetry_provider.py",  # lazy-loads telemetry_langfuse
+        "src/gateway/governance/semantic_rail_factory.py",  # lazy-loads integrations.nemo semantic rail provider
+        "src/gateway/governance/pii_redactor_factory.py",  # lazy-loads integrations.presidio PII redactor provider
+        "src/gateway/infrastructure/redis_credential_factory.py",  # lazy-loads gcp Memorystore IAM credential provider
+    ]
+)
+
+# Allowlist for function-scope lazy imports of compliance_bridge in Layer 1
+# OSCAL SSP exporter may lazy-load AssurancePosture for metadata injection (v3.1.5).
+# Adding an entry requires deliberate architectural review — keep this minimal.
+COMPLIANCE_BRIDGE_FACTORY_ALLOWLIST = frozenset(
+    [
+        "src/gateway/governance/oscal_ssp_exporter.py",  # lazy-loads AssurancePosture for SSP metadata
+    ]
+)
+
+
+@dataclass(frozen=True)
+class BoundaryViolation:
+    file_path: str
+    line_number: int
+    imported_module: str
+    rule_violated: str
+
+
+def _collect_docstring_node_ids(tree: ast.AST) -> set[int]:
+    """Collect AST node IDs of module, class, and function docstrings."""
+    docstring_ids: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(
+            node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+        ):
+            if (
+                node.body
+                and isinstance(node.body[0], ast.Expr)
+                and isinstance(node.body[0].value, ast.Constant)
+                and isinstance(node.body[0].value.value, str)
+            ):
+                docstring_ids.add(id(node.body[0].value))
+    return docstring_ids
+
+
+class ImportVisitor(ast.NodeVisitor):
+    """AST visitor to extract all import statements and kernel purity violations.
+
+    Emits (module_name, line_number, is_module_scope) triples for imports,
+    plus string constants (excluding docstrings) and class/function definitions.
+    Class-body imports are treated as module-scope for this rule.
+    """
+
+    def __init__(self, docstring_ids: set[int] | None = None) -> None:
+        self.imports: list[tuple[str, int, bool]] = []
+        self.string_literals: list[tuple[str, int]] = []
+        self.definitions: list[tuple[str, int, str]] = []
+        self.syntax_error: tuple[int, str] | None = None
+        self._scope_depth: int = 0
+        self._docstring_ids: set[int] = docstring_ids or set()
+
+    def visit_Import(self, node: ast.Import) -> None:
+        """Visit `import x` statements."""
+        is_module_scope = self._scope_depth == 0
+        for alias in node.names:
+            self.imports.append((alias.name, node.lineno, is_module_scope))
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        """Visit `from x import y` statements."""
+        is_module_scope = self._scope_depth == 0
+        if node.module in {"src", "google"} and node.names:
+            for alias in node.names:
+                self.imports.append(
+                    (f"{node.module}.{alias.name}", node.lineno, is_module_scope)
+                )
+        elif node.module:
+            self.imports.append((node.module, node.lineno, is_module_scope))
+        else:
+            for alias in node.names:
+                self.imports.append((alias.name, node.lineno, is_module_scope))
+        self.generic_visit(node)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        """Track entry/exit of function scope and record function definitions."""
+        self.definitions.append((node.name, node.lineno, "function"))
+        self._scope_depth += 1
+        self.generic_visit(node)
+        self._scope_depth -= 1
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        """Track entry/exit of async function scope and record function definitions."""
+        self.definitions.append((node.name, node.lineno, "async function"))
+        self._scope_depth += 1
+        self.generic_visit(node)
+        self._scope_depth -= 1
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        """Track entry/exit of class scope and record class definitions.
+
+        Note: class-body imports are NOT considered function-scope for this rule.
+        """
+        self.definitions.append((node.name, node.lineno, "class"))
+        # Do NOT increment scope_depth — class-body imports are module-scope
+        self.generic_visit(node)
+
+    def visit_Constant(self, node: ast.Constant) -> None:
+        """Visit string constants (excluding docstrings)."""
+        if isinstance(node.value, str) and id(node) not in self._docstring_ids:
+            self.string_literals.append((node.value, node.lineno))
+        self.generic_visit(node)
+
+
+def _analyze_ast(filepath: Path) -> ImportVisitor | None:
+    """Parse a Python file and visit its AST with ImportVisitor."""
+    try:
+        with open(filepath, encoding="utf-8") as f:
+            tree = ast.parse(f.read(), filename=str(filepath))
+        docstring_ids = _collect_docstring_node_ids(tree)
+        visitor = ImportVisitor(docstring_ids=docstring_ids)
+        visitor.visit(tree)
+        return visitor
+    except SyntaxError as exc:
+        visitor = ImportVisitor()
+        visitor.syntax_error = (exc.lineno or 1, exc.msg or "invalid syntax")
+        return visitor
+    except FileNotFoundError:
+        return None
+
+
+def extract_imports(filepath: Path) -> list[tuple[str, int, bool]]:
+    """Extract all (import_module_name, line_number, is_module_scope) triples from a Python file."""
+    visitor = _analyze_ast(filepath)
+    return visitor.imports if visitor is not None else []
+
+
+def check_file_boundaries(
+    filepath: Path, verbose: bool = False
+) -> list[BoundaryViolation]:
+    """Check if a file violates import boundaries or kernel AST purity rules.
+
+    Returns:
+        List of BoundaryViolation instances.
+    """
+    violations: list[BoundaryViolation] = []
+    visitor = _analyze_ast(filepath)
+    if visitor is None:
+        return violations
+    filepath_str = str(filepath)
+    if visitor.syntax_error is not None:
+        lineno, msg = visitor.syntax_error
+        violations.append(
+            BoundaryViolation(
+                file_path=filepath_str,
+                line_number=lineno,
+                imported_module="<SyntaxError>",
+                rule_violated=f"SyntaxError during AST boundary scan (fail-closed): {msg}",
+            )
+        )
+        return violations
+    imports = visitor.imports
+
+    is_layer1 = False
+    try:
+        if filepath.is_relative_to(
+            LAYER_1_GATEWAY
+        ) or filepath.resolve().is_relative_to(LAYER_1_GATEWAY.resolve()):
+            is_layer1 = True
+    except (ValueError, FileNotFoundError):
+        pass
+
+    if not is_layer1:
+        parts = filepath.parts
+        for i in range(len(parts) - 1):
+            if parts[i] == "src" and parts[i + 1] == "gateway":
+                is_layer1 = True
+                break
+
+    if not is_layer1:
+        return violations
+
+    # Check if file is in the integrations factory allowlist
+    is_in_factory_allowlist = any(
+        filepath_str.endswith(allowed_path) or allowed_path in filepath_str
+        for allowed_path in INTEGRATIONS_FACTORY_ALLOWLIST
+    )
+
+    # Check if file is in the compliance_bridge factory allowlist
+    is_in_bridge_allowlist = any(
+        filepath_str.endswith(allowed_path) or allowed_path in filepath_str
+        for allowed_path in COMPLIANCE_BRIDGE_FACTORY_ALLOWLIST
+    )
+
+    for imp, lineno, is_module_scope in imports:
+        # Check Layer 1 -> Layer 2
+        if LAYER_2_CAGE_PATTERN.match(imp):
+            v = BoundaryViolation(
+                file_path=filepath_str,
+                line_number=lineno,
+                imported_module=imp,
+                rule_violated="Layer 1 → Layer 2 (gateway must not import cage_*)",
+            )
+            violations.append(v)
+            if verbose:
+                print(f"❌ {filepath_str}:{lineno}: imports {imp} ({v.rule_violated})")
+
+        # Check Layer 1 -> Layer 3 compliance_bridge (scope-aware with allowlist)
+        if LAYER_3_BRIDGE_PATTERN.match(imp):
+            if is_module_scope:
+                # Module-scope compliance_bridge imports are ALWAYS forbidden
+                v = BoundaryViolation(
+                    file_path=filepath_str,
+                    line_number=lineno,
+                    imported_module=imp,
+                    rule_violated="Layer 1 → Layer 3 (module-scope compliance_bridge import forbidden; use function-scope lazy import)",
+                )
+                violations.append(v)
+                if verbose:
+                    print(
+                        f"❌ {filepath_str}:{lineno}: imports {imp} ({v.rule_violated})"
+                    )
+            elif not is_in_bridge_allowlist:
+                # Function-scope import but file not in allowlist
+                v = BoundaryViolation(
+                    file_path=filepath_str,
+                    line_number=lineno,
+                    imported_module=imp,
+                    rule_violated="Layer 1 → Layer 3 (compliance_bridge import outside the factory allowlist)",
+                )
+                violations.append(v)
+                if verbose:
+                    print(
+                        f"❌ {filepath_str}:{lineno}: imports {imp} ({v.rule_violated})"
+                    )
+            # else: function-scope AND in allowlist → permitted (no violation)
+
+        # Check Layer 1 -> Layer 3 integrations (scope-aware)
+        if LAYER_3_INTEGRATIONS_PATTERN.match(imp):
+            if is_module_scope:
+                # Module-scope integrations imports are ALWAYS forbidden
+                v = BoundaryViolation(
+                    file_path=filepath_str,
+                    line_number=lineno,
+                    imported_module=imp,
+                    rule_violated="Layer 1 → Layer 3 (module-scope src.integrations import forbidden; use a function-scope lazy factory import)",
+                )
+                violations.append(v)
+                if verbose:
+                    print(
+                        f"❌ {filepath_str}:{lineno}: imports {imp} ({v.rule_violated})"
+                    )
+            elif not is_in_factory_allowlist:
+                # Function-scope import but file not in allowlist
+                v = BoundaryViolation(
+                    file_path=filepath_str,
+                    line_number=lineno,
+                    imported_module=imp,
+                    rule_violated="Layer 1 → Layer 3 (src.integrations import outside the factory allowlist)",
+                )
+                violations.append(v)
+                if verbose:
+                    print(
+                        f"❌ {filepath_str}:{lineno}: imports {imp} ({v.rule_violated})"
+                    )
+            # else: function-scope AND in allowlist → permitted (no violation)
+
+        # Check Layer 1 -> Layer 4
+        if LAYER_4_GFA_PATTERN.match(imp):
+            v = BoundaryViolation(
+                file_path=filepath_str,
+                line_number=lineno,
+                imported_module=imp,
+                rule_violated="Layer 1 → Layer 4 (gateway must not import governed_financial_advisor)",
+            )
+            violations.append(v)
+            if verbose:
+                print(f"❌ {filepath_str}:{lineno}: imports {imp} ({v.rule_violated})")
+
+        # Check Online Enforcement (Layer 1) -> Offline Evaluation System (src/eval_harness/)
+        if OFFLINE_EVAL_PATTERN.match(imp):
+            v = BoundaryViolation(
+                file_path=filepath_str,
+                line_number=lineno,
+                imported_module=imp,
+                rule_violated="Online → Offline (gateway must not import offline eval_harness)",
+            )
+            violations.append(v)
+            if verbose:
+                print(f"❌ {filepath_str}:{lineno}: imports {imp} ({v.rule_violated})")
+
+        # Rule 4: Vendor SDK imports forbidden across ALL of Layer 1 (src/gateway/)
+        for vendor_sdk in FORBIDDEN_VENDOR_SDKS:
+            if imp == vendor_sdk or imp.startswith(f"{vendor_sdk}."):
+                v = BoundaryViolation(
+                    file_path=filepath_str,
+                    line_number=lineno,
+                    imported_module=imp,
+                    rule_violated=f"Kernel vendor neutrality / Evidence kernel vendor neutrality (forbidden vendor SDK: {vendor_sdk})",
+                )
+                violations.append(v)
+                if verbose:
+                    print(
+                        f"❌ {filepath_str}:{lineno}: imports {imp} ({v.rule_violated})"
+                    )
+                break
+
+    # Rule 1 & Rule 2: Non-docstring string literals in Layer 1
+    for literal, lineno in visitor.string_literals:
+        if PATH_LITERAL_PATTERN.search(literal):
+            v = BoundaryViolation(
+                file_path=filepath_str,
+                line_number=lineno,
+                imported_module=literal,
+                rule_violated="Rule 1: Forbidden domain path literal in Layer 1 kernel",
+            )
+            violations.append(v)
+            if verbose:
+                print(
+                    f"❌ {filepath_str}:{lineno}: literal '{literal}' ({v.rule_violated})"
+                )
+        if literal in FORBIDDEN_DOMAIN_LITERALS:
+            v = BoundaryViolation(
+                file_path=filepath_str,
+                line_number=lineno,
+                imported_module=literal,
+                rule_violated=f"Rule 2: Forbidden domain literal '{literal}' in Layer 1 kernel",
+            )
+            violations.append(v)
+            if verbose:
+                print(
+                    f"❌ {filepath_str}:{lineno}: literal '{literal}' ({v.rule_violated})"
+                )
+
+    # Rule 3: Forbidden class / function definitions in Layer 1
+    for def_name, lineno, def_kind in visitor.definitions:
+        if def_name in FORBIDDEN_KERNEL_DEFINITIONS:
+            v = BoundaryViolation(
+                file_path=filepath_str,
+                line_number=lineno,
+                imported_module=def_name,
+                rule_violated=f"Rule 3: Forbidden domain/vendor {def_kind} definition '{def_name}' in Layer 1 kernel",
+            )
+            violations.append(v)
+            if verbose:
+                print(
+                    f"❌ {filepath_str}:{lineno}: {def_kind} {def_name} ({v.rule_violated})"
+                )
+
+    return violations
+
+
+# Allowlist for specific Layer 3 integrations files that have justified cross-layer dependencies.
+# Each entry requires explicit architectural justification — keep this minimal.
+INTEGRATIONS_BOUNDARY_ALLOWLIST = frozenset(
+    [
+        # provider_02/cer_index.py implements the CERIndex Protocol defined in compliance_bridge
+        # and is dependency-injected into compliance_bridge at FastAPI startup (B6 integration).
+        # Importing Disclosure enum from the protocol it implements is legitimate coupling.
+        "src/integrations/provider_02/cer_index.py",
+    ]
+)
+
+
+def check_integrations_boundaries(
+    filepath: Path, verbose: bool = False
+) -> list[BoundaryViolation]:
+    """Check if a Layer 3 integrations file imports from Layer 2/4.
+
+    Layer 3 (src/integrations/) must NOT import from:
+    - Layer 2 (src/cage_*) — except test files importing domain test fixtures
+    - Layer 3 compliance_bridge (src/compliance_bridge/) — except allowlisted protocol implementations
+    - Layer 4 (src/governed_financial_advisor/)
+
+    Returns:
+        List of BoundaryViolation instances.
+    """
+    violations: list[BoundaryViolation] = []
+    imports = extract_imports(filepath)
+    filepath_str = str(filepath)
+
+    # Check if file is in the integrations boundary allowlist
+    is_in_boundary_allowlist = any(
+        filepath_str.endswith(allowed_path) or allowed_path in filepath_str
+        for allowed_path in INTEGRATIONS_BOUNDARY_ALLOWLIST
+    )
+
+    # Check if this is a test file (tests may import domain fixtures)
+    is_test_file = "/tests/" in filepath_str or filepath_str.endswith("_test.py")
+
+    for imp, lineno, _is_module_scope in imports:
+        # Check Layer 3 integrations -> Layer 2 cage_*
+        if LAYER_2_CAGE_PATTERN.match(imp):
+            # Test files may import domain fixtures
+            if not is_test_file:
+                v = BoundaryViolation(
+                    file_path=filepath_str,
+                    line_number=lineno,
+                    imported_module=imp,
+                    rule_violated="Layer 3 integrations → Layer 2 (integrations must not import cage_*)",
+                )
+                violations.append(v)
+                if verbose:
+                    print(
+                        f"❌ {filepath_str}:{lineno}: imports {imp} ({v.rule_violated})"
+                    )
+
+        # Check Layer 3 integrations -> Layer 3 compliance_bridge
+        if LAYER_3_BRIDGE_PATTERN.match(imp):
+            # Allowlisted protocol implementations may import from compliance_bridge
+            if not is_in_boundary_allowlist:
+                v = BoundaryViolation(
+                    file_path=filepath_str,
+                    line_number=lineno,
+                    imported_module=imp,
+                    rule_violated="Layer 3 integrations → Layer 3 compliance_bridge (cross-Layer-3 coupling forbidden)",
+                )
+                violations.append(v)
+                if verbose:
+                    print(
+                        f"❌ {filepath_str}:{lineno}: imports {imp} ({v.rule_violated})"
+                    )
+
+        # Check Layer 3 integrations -> Layer 4
+        if LAYER_4_GFA_PATTERN.match(imp):
+            v = BoundaryViolation(
+                file_path=filepath_str,
+                line_number=lineno,
+                imported_module=imp,
+                rule_violated="Layer 3 integrations → Layer 4 (integrations must not import governed_financial_advisor)",
+            )
+            violations.append(v)
+            if verbose:
+                print(f"❌ {filepath_str}:{lineno}: imports {imp} ({v.rule_violated})")
+
+    return violations
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Check layer import boundaries")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
+    args = parser.parse_args()
+
+    print("🔍 Checking import boundaries (Gate G3)...")
+
+    gateway_root = Path(LAYER_1_GATEWAY)
+    if not gateway_root.exists():
+        print(f"❌ Gateway layer not found: {gateway_root}")
+        return 1
+
+    all_violations: list[BoundaryViolation] = []
+    scanned_count = 0
+
+    # Forward scan: Layer 1 (gateway) must not import from Layer 2/3/4
+    for py_file in gateway_root.rglob("*.py"):
+        if "__pycache__" in str(py_file):
+            continue
+        scanned_count += 1
+        violations = check_file_boundaries(py_file, verbose=args.verbose)
+        all_violations.extend(violations)
+
+    print(f"📊 Forward scan: {scanned_count} files in {LAYER_1_GATEWAY}/")
+
+    # Reverse scan: Layer 3 (integrations) must not import from Layer 2/4
+    integrations_root = Path(LAYER_3_INTEGRATIONS)
+    if integrations_root.exists():
+        integrations_count = 0
+        for py_file in integrations_root.rglob("*.py"):
+            if "__pycache__" in str(py_file):
+                continue
+            integrations_count += 1
+            violations = check_integrations_boundaries(py_file, verbose=args.verbose)
+            all_violations.extend(violations)
+        print(f"📊 Reverse scan: {integrations_count} files in {LAYER_3_INTEGRATIONS}/")
+
+    if all_violations:
+        print(f"\n❌ BOUNDARY VIOLATIONS DETECTED ({len(all_violations)}):\n")
+        for v in all_violations:
+            print(f"  {v.file_path}:{v.line_number}")
+            print(f"    └─ imports {v.imported_module} [{v.rule_violated}]\n")
+
+        print("🚨 Layer 1 (gateway) must NOT import from Layer 2, Layer 3, or Layer 4.")
+        print("🚨 Layer 1 module-scope imports of src.integrations are FORBIDDEN.")
+        print(
+            "🚨 Function-scope lazy imports of src.integrations require explicit allowlist entry."
+        )
+        print(
+            "🚨 Layer 3 (integrations) must NOT import from Layer 2 (cage_*) or Layer 4."
+        )
+        print(
+            "🚨 Layer 3 cross-coupling (integrations ↔ compliance_bridge) is forbidden."
+        )
+        print("🚨 Evidence kernel must NOT import proprietary vendor SDKs.")
+        print()
+        print("   Remediation:")
+        print("   • Use dependency injection or canonical interfaces (Layer 2/4)")
+        print("   • For vendor adapters: use function-scope lazy factory imports")
+        print(
+            "   • Adding to INTEGRATIONS_FACTORY_ALLOWLIST requires architectural review"
+        )
+        print(
+            "   • Integrations must use kernel seams (NormativeProvider, AttestationProvider)"
+        )
+        return 1
+
+    print("✅ All import boundaries respected.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

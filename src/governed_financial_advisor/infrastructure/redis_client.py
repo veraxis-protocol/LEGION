@@ -1,0 +1,267 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import logging
+import os
+import ssl
+
+from redis.asyncio import ConnectionPool, Redis
+from redis.exceptions import ConnectionError, RedisError, TimeoutError
+
+from src.gateway.infrastructure.redis_client import (
+    TransactionAbortedError,  # re-exported
+)
+from src.gateway.infrastructure.telemetry_client import get_tracer
+
+__all__ = [
+    "AsyncRedisClient",
+    "TransactionAbortedError",
+    "redis_client",
+]
+
+logger = logging.getLogger("Infrastructure.Redis")
+
+
+class AsyncRedisClient:
+    """
+    Strict Async Redis Client for LangGraph Checkpointing.
+    Enforces explicitly typed state, connection timeouts, and failing-fast.
+    """
+
+    def __init__(self) -> None:
+        redis_url = os.getenv("REDIS_URL")
+        redis_host = os.getenv("REDIS_HOST")
+        if not redis_url and not redis_host:
+            logger.warning(
+                "Neither REDIS_URL nor REDIS_HOST is set — Redis client will not be available. "
+                "Sessions will not persist across pod restarts."
+            )
+        self.redis_url: str = redis_url or ""
+
+        # HIGH-04: TLS detection — enabled when REDIS_TLS=true OR REDIS_URL uses rediss://
+        self.use_tls: bool = os.getenv("REDIS_TLS", "").lower() in (
+            "true",
+            "1",
+            "yes",
+        ) or self.redis_url.startswith("rediss://")
+        if self.use_tls:
+            logger.info("🔒 FinancialAdvisor Redis TLS enabled (rediss://)")
+
+        # Determine host: REDIS_URL takes precedence when set (its parsed hostname
+        # is the authoritative value).  REDIS_HOST is only used as a fallback when
+        # REDIS_URL is absent, which preserves backwards compatibility for
+        # deployments that set only REDIS_HOST.
+        if redis_url:
+            # Parse host from e.g. "redis://myredis:1234" → "myredis"
+            try:
+                from urllib.parse import urlparse
+
+                parsed = urlparse(redis_url)
+                self.redis_host: str = parsed.hostname or ""
+            except Exception:
+                self.redis_host = redis_host or ""
+        elif redis_host:
+            self.redis_host = redis_host
+        else:
+            self.redis_host = ""
+
+        # Determine port: prefer parsing REDIS_PORT env (handles Kubernetes
+        # "tcp://host:port" injection); fall back to REDIS_URL; last resort 6379.
+        redis_port_env = os.getenv("REDIS_PORT", "")
+        if redis_port_env:
+            try:
+                # Strip Kubernetes "tcp://host:port" prefix if present
+                raw = redis_port_env.replace("tcp://", "").split(":")[-1]
+                self.redis_port: int = int(raw)
+            except ValueError:
+                self.redis_port = 6379
+        elif redis_url:
+            try:
+                from urllib.parse import urlparse
+
+                parsed = urlparse(redis_url)
+                self.redis_port = parsed.port or 6379
+            except Exception:
+                self.redis_port = 6379
+        else:
+            self.redis_port = 6379
+
+        self.pool: ConnectionPool | None = None
+        self.client: Redis | None = None
+        self.use_redis: bool = bool(
+            self.redis_host
+        ) and self.redis_host.lower() not in ["", "none", "false"]
+        self.tracer = get_tracer()
+
+    async def connect(self) -> None:
+        """Initializes the async connection pool with strict timeouts."""
+        if not self.use_redis:
+            logger.warning(
+                "REDIS_HOST disabled. Async client cannot initialized memory fallback in prod."
+            )
+            return
+
+        # 1. Try Sentinel Connection
+        try:
+            import socket
+
+            from redis.asyncio.sentinel import Sentinel
+
+            # Probe Sentinel port 26379
+            s_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s_sock.settimeout(1.0)
+            result = s_sock.connect_ex((self.redis_host, 26379))
+            s_sock.close()
+
+            if result == 0:
+                logger.info(
+                    f"Sentinel detected at {self.redis_host}:26379. Resolving master 'mymaster'..."
+                )
+                password = os.getenv("REDIS_PASSWORD")
+                if not password and self.redis_url:
+                    try:
+                        from urllib.parse import urlparse
+
+                        parsed_url = urlparse(self.redis_url)
+                        if parsed_url.password:
+                            password = parsed_url.password
+                    except Exception:
+                        pass
+                sentinel = Sentinel(
+                    [(self.redis_host, 26379)],
+                    sentinel_kwargs={"password": password} if password else None,
+                    socket_connect_timeout=2.0,
+                    socket_timeout=5.0,
+                )
+                self.client = sentinel.master_for(
+                    "mymaster",
+                    password=password if password else None,
+                    decode_responses=True,
+                )
+                await self.client.ping()  # type: ignore[misc]  # redis-py ping() returns bool | Awaitable[bool] depending on connection type
+                logger.info(
+                    "✅ Async Redis Pool established via Sentinel master connection."
+                )
+                return
+        except Exception as sentinel_exc:
+            logger.warning(
+                f"Sentinel initialization failed, falling back to standard Redis: {sentinel_exc}"
+            )
+
+        # 2. Fallback to Standard Connection
+        try:
+            pool_kwargs: dict = {
+                "max_connections": 100,
+                "socket_connect_timeout": 2.0,
+                "socket_timeout": 5.0,
+                "decode_responses": True,
+            }
+            if self.use_tls:
+                pool_kwargs["ssl"] = True
+                cage_env = os.getenv(
+                    "CAGE_ENV", "prod"
+                ).lower()  # Default to "prod" to fail-secure: missing CAGE_ENV must not silently disable enforcement
+                if cage_env == "dev":
+                    # In dev mode, allow optional cert verification with a warning
+                    pool_kwargs["ssl_cert_reqs"] = ssl.CERT_OPTIONAL
+                    logger.warning(
+                        "⚠️ Redis TLS: ssl_cert_reqs=OPTIONAL in dev mode. "
+                        "Set CAGE_ENV=prod to enforce certificate verification."
+                    )
+                else:
+                    # In production, require full certificate verification (M-04)
+                    pool_kwargs["ssl_cert_reqs"] = ssl.CERT_REQUIRED
+                    ca_cert_path = os.environ.get(
+                        "REDIS_CA_CERT_PATH", "/etc/ssl/certs/ca-certificates.crt"
+                    )
+                    pool_kwargs["ssl_ca_certs"] = ca_cert_path
+                    logger.info(
+                        "🔒 Redis TLS: ssl_cert_reqs=REQUIRED, ca_certs=%s",
+                        ca_cert_path,
+                    )
+            self.pool = ConnectionPool.from_url(
+                self.redis_url,
+                **pool_kwargs,
+            )
+            self.client = Redis(connection_pool=self.pool)
+            await self.client.ping()  # type: ignore[misc]  # redis-py ping() returns bool | Awaitable[bool]
+            logger.info(f"✅ Async Redis Pool established at {self.redis_url}")
+        except (ConnectionError, TimeoutError) as e:
+            logger.error(f"❌ CRITICAL: Async Redis Connection Failed: {e}")
+            self.client = None
+            # Fail fast - do not fallback to memory in a distributed cluster
+            raise e
+
+    async def close(self) -> None:
+        """Gracefully closes the connection pool."""
+        if self.client:
+            await self.client.aclose()
+            logger.info("Closed Async Redis connections.")
+
+    async def get(self, key: str) -> str | None:
+        """Async retrieval with OpenTelemetry tracking."""
+        if not self.client:
+            raise ConnectionError("AsyncRedisClient not connected.")
+
+        with self.tracer.start_as_current_span("redis.get") as span:
+            span.set_attribute("redis.key", key)
+            try:
+                return await self.client.get(key)
+            except RedisError as e:
+                span.record_exception(e)
+                logger.error(f"Async Redis GET Error: {e}")
+                raise
+
+    async def get_float(self, key: str, default: float = 0.0) -> float:
+        """Typed async payload retrieval."""
+        val = await self.get(key)
+        if val is None:
+            return default
+        try:
+            return float(val)
+        except ValueError:
+            logger.warning(f"Type parsing error for {key}: Expected float, got {val}")
+            return default
+
+    async def set(self, key: str, value: str, ttl: int | None = None) -> None:
+        """Async state persistence."""
+        if not self.client:
+            raise ConnectionError("AsyncRedisClient not connected.")
+
+        with self.tracer.start_as_current_span("redis.set") as span:
+            span.set_attribute("redis.key", key)
+            try:
+                await self.client.set(key, value, ex=ttl)
+            except RedisError as e:
+                span.record_exception(e)
+                logger.error(f"Async Redis SET Error: {e}")
+                raise
+
+    async def delete(self, key: str) -> None:
+        """Async key deletion."""
+        if not self.client:
+            raise ConnectionError("AsyncRedisClient not connected.")
+
+        with self.tracer.start_as_current_span("redis.delete") as span:
+            span.set_attribute("redis.key", key)
+            try:
+                await self.client.delete(key)
+            except RedisError as e:
+                span.record_exception(e)
+                logger.error(f"Async Redis DELETE Error: {e}")
+                raise
+
+
+# Global Instance Interface
+redis_client = AsyncRedisClient()

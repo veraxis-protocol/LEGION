@@ -1,0 +1,617 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""
+MCP Tool Server (Phase 3.1)
+============================
+Dedicated to FastMCP tool registration (``@mcp.tool()``) and SSE transport.
+Contains no HTTP proxy logic or REST endpoints.
+
+This module is the single entry point for the headless governance engine's
+MCP surface.  All tool calls are intercepted by ``mcp_tracing.patch_mcp_tools``
+for W3C trace context propagation (Phase 5.2 — already implemented).
+
+Phase 3.3: Routing seal enforcement is applied to every tool call via the
+``_seal_tool_wrapper`` middleware injected into the FastMCP ToolManager.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import collections
+import inspect
+import logging
+import math
+import os
+import sys
+import time
+from contextlib import asynccontextmanager
+from typing import Any
+
+from fastapi import FastAPI, HTTPException, Request
+from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
+from pydantic import BaseModel, field_validator
+
+from src.gateway.observability.attributes import (
+    OBSERVATION_NAME,
+    OBSERVATION_TYPE,
+    SESSION_ID,
+    SPAN_ATTR_OPA_POLICY_PATH,
+)
+
+sys.path.append(".")
+
+from opentelemetry import trace
+
+from src.gateway.governance.decisions import GovernanceDecision
+from src.gateway.governance.governor.governor import SymbolicGovernor
+from src.gateway.governance.schemas.thresholds import load_and_validate_thresholds
+from src.gateway.infrastructure.config_manager import config_manager
+from src.gateway.observability.mcp_tracing import patch_mcp_tools
+from src.gateway.server.app_state import governor_of
+from src.gateway.tracing_setup import setup_tracing
+
+logger = logging.getLogger("Gateway.MCPToolServer")
+tracer = trace.get_tracer("gateway.mcp_tool_server")
+
+# ---------------------------------------------------------------------------
+# M-20 & L-2: Per-client sliding-window rate limiter with Prometheus metrics
+# Limits each client IP to _RATE_LIMIT_MAX_CALLS tool calls per
+# _RATE_LIMIT_WINDOW_SECONDS. Uses an in-process deque; no Redis dependency.
+# ---------------------------------------------------------------------------
+
+_RATE_LIMIT_MAX_CALLS: int = int(os.getenv("MCP_RATE_LIMIT_MAX_CALLS", "60"))
+_RATE_LIMIT_WINDOW_SECONDS: int = int(os.getenv("MCP_RATE_LIMIT_WINDOW_SECONDS", "60"))
+_RATE_LIMIT_MAX_BUCKETS: int = 10000
+
+# client_ip → deque of call timestamps (monotonic), bounded by TTLCache
+try:
+    from cachetools import TTLCache
+
+    _rate_limit_buckets: Any = TTLCache(
+        maxsize=_RATE_LIMIT_MAX_BUCKETS,
+        ttl=max(1, _RATE_LIMIT_WINDOW_SECONDS * 2),
+    )
+except ImportError:
+    _rate_limit_buckets = {}
+_rate_limit_lock = asyncio.Lock()
+
+# Prometheus metrics (optional — degrades gracefully if prometheus_client unavailable)
+_METRICS_AVAILABLE = False
+_rate_limit_hits_total: Any = None
+_rate_limit_active_buckets: Any = None
+
+try:
+    from prometheus_client import REGISTRY, Counter, Gauge
+
+    _METRICS_AVAILABLE = True
+    try:
+        _rate_limit_hits_total = Counter(
+            "mcp_rate_limit_hits_total",
+            "Total number of rate limit rejections",
+            ["client_ip"],
+        )
+    except ValueError:
+        _rate_limit_hits_total = REGISTRY._names_to_collectors.get(
+            "mcp_rate_limit_hits_total"
+        )
+
+    try:
+        _rate_limit_active_buckets = Gauge(
+            "mcp_rate_limit_active_buckets",
+            "Current number of active client rate limit tracking buckets",
+        )
+    except ValueError:
+        _rate_limit_active_buckets = REGISTRY._names_to_collectors.get(
+            "mcp_rate_limit_active_buckets"
+        )
+except ImportError:
+    pass
+
+
+async def _check_rate_limit(client_ip: str) -> bool:
+    """Return True if the request is within the rate limit, False if exceeded.
+
+    Uses a sliding-window algorithm: timestamps older than the window are
+    evicted before counting, so the limit is enforced over a rolling period.
+    """
+    now = time.monotonic()
+    cutoff = now - _RATE_LIMIT_WINDOW_SECONDS
+    async with _rate_limit_lock:
+        # Evict any expired timestamps across existing bucket for this IP
+        bucket = _rate_limit_buckets.get(client_ip)
+        if bucket is None:
+            bucket = collections.deque()
+            _rate_limit_buckets[client_ip] = bucket
+        while bucket and bucket[0] < cutoff:
+            bucket.popleft()
+        # Clean up other empty buckets if plain dict fallback is used
+        empty_keys = [
+            k for k, v in _rate_limit_buckets.items() if not v and k != client_ip
+        ]
+        for k in empty_keys:
+            _rate_limit_buckets.pop(k, None)
+        if _METRICS_AVAILABLE and _rate_limit_active_buckets is not None:
+            _rate_limit_active_buckets.set(len(_rate_limit_buckets))
+        if len(bucket) >= _RATE_LIMIT_MAX_CALLS:
+            if _METRICS_AVAILABLE and _rate_limit_hits_total is not None:
+                _rate_limit_hits_total.labels(client_ip=client_ip).inc()
+            return False
+        bucket.append(now)
+        return True
+
+
+# ---------------------------------------------------------------------------
+# Startup validation and telemetry bootstrap
+# ---------------------------------------------------------------------------
+
+
+def _install_contributions(governor: SymbolicGovernor) -> None:
+    """Apply the server hooks each domain contributed (tools, tasks, rails).
+
+    Compliance overlays are process-wide and registered by ``bootstrap_governor``.
+    """
+    from src.gateway.governance.background_tasks import register_background_task
+    from src.gateway.governance.semantic_rail_factory import (
+        register_semantic_rail_provider as register_rail_provider,
+    )
+
+    for contribution in governor.components.contributions:
+        for name, worker in contribution.background_tasks.items():
+            register_background_task(name, worker)
+        for rail_provider in contribution.rail_providers:
+            register_rail_provider(rail_provider)
+        if contribution.tool_provider is not None:
+            contribution.tool_provider.register_tools(mcp, governor)
+
+
+async def _activate_domain() -> SymbolicGovernor:
+    """Assemble the governor for the single ``CAGE_DOMAIN`` and put it on ``app.state``.
+
+    Fail closed at startup: an unset/unknown domain, a domain without a
+    complete ``DomainConfig``, an unsafe contribution, null kernel slots, a
+    failed production posture check, or an OPA server that lacks the
+    domain's Rego package or required rules all raise instead of serving
+    traffic.
+    """
+    from src.gateway.governance.governor.bootstrap import bootstrap_governor
+    from src.gateway.governance.plugin_loader import active_domain_config
+
+    governor = bootstrap_governor()
+    config = active_domain_config()
+    await governor.components.opa.verify_domain_policy(
+        config.opa_package, config.opa_required_rules
+    )
+    _install_contributions(
+        governor
+    )  # after the handshake: never half-activate a domain
+    app.state.governor = governor
+    logger.info(
+        "✅ Domain activated (startup readiness check passed): %s",
+        governor.registered_tier_names(),
+    )
+    return governor
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
+    from src.gateway.governance.semantic_rail_factory import (
+        initialize_semantic_rails as initialize_rails,
+    )
+
+    # 1. Tracing bootstrap (Phase 5.1)
+    setup_tracing()
+
+    # 2. Governance threshold validation (Phase 2.2) — aborts if schema invalid
+    load_and_validate_thresholds()
+
+    # 3. Env guards
+    logger.info("🚀 CAGE MCP Tool Server Starting...")
+    vllm_base = config_manager.get("VLLM_BASE_URL")
+    if not vllm_base:
+        raise RuntimeError(
+            "VLLM_BASE_URL must be set — no localhost fallback in production."
+        )
+    vllm_api_key = config_manager.get("VLLM_API_KEY")
+    if not vllm_api_key:
+        raise RuntimeError(
+            "VLLM_API_KEY must be set — no 'EMPTY' fallback in production."
+        )
+
+    # 4. Initialise NeMo rails and store on app state
+    app.state.nemo_rails = initialize_rails()
+
+    # 5. Start consensus background audit worker (Phase 4.4)
+    from src.gateway.governance.consensus import _background_audit_worker
+
+    audit_task = asyncio.create_task(_background_audit_worker())
+    app.state.audit_task = audit_task
+
+    # 6. Assemble the governor for the single CAGE_DOMAIN plugin (fail-closed
+    #    readiness and posture checks, including the OPA package/rule handshake)
+    governor = await _activate_domain()
+
+    yield
+
+    # Shutdown
+    logger.info("🛑 CAGE MCP Tool Server Shutting Down...")
+    audit_task.cancel()
+    try:
+        await audit_task
+    except asyncio.CancelledError:
+        pass
+    await governor.components.opa.close()
+
+
+# ---------------------------------------------------------------------------
+# FastAPI + MCP
+# ---------------------------------------------------------------------------
+
+app = FastAPI(title="CAGE MCP Tool Server", lifespan=lifespan)
+
+# OTel middleware
+try:
+    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
+    _SCANNER_NOISE_PREFIXES = (
+        "/.git",
+        "/.env",
+        "/wp-admin",
+        "/phpmyadmin",
+        "/admin",
+        "/actuator",
+    )
+
+    def _server_request_hook(span, scope):  # type: ignore[no-untyped-def]
+        if not span or not span.is_recording():
+            return
+        method = scope.get("method", "").upper()
+        path = scope.get("path", "")
+        if method not in {"GET", "POST"} or path.lower().startswith(
+            _SCANNER_NOISE_PREFIXES
+        ):
+            span.set_attribute("otel.drop", True)
+            span.set_recording(False)
+            return
+        span.set_attribute("input", f"{method} {path}")
+        span.update_name(f"{method} {path}")
+        headers = {
+            k.decode("utf-8").lower(): v.decode("utf-8")
+            for k, v in scope.get("headers", [])
+        }
+        session_id = headers.get("x-session-id")
+        if session_id:
+            span.set_attribute(SESSION_ID, session_id)
+
+    FastAPIInstrumentor.instrument_app(
+        app,
+        server_request_hook=_server_request_hook,
+        excluded_urls="health,docs,openapi.json,favicon.ico,mcp",
+    )
+    logger.info("✅ FastAPI OTel instrumentation activated.")
+except ImportError:
+    logger.warning("⚠️ FastAPIInstrumentor not found, skipping.")
+
+# Allow in-cluster Kubernetes hostnames in addition to localhost variants.
+# FastMCP defaults to only localhost:* / 127.0.0.1:* / [::1]:*, which causes
+# 421 "Invalid Host header" when the governed-financial-advisor pod calls the
+# gateway via its in-cluster DNS name (e.g. "gateway:8080").
+_ALLOWED_HOSTS = [
+    "127.0.0.1:*",
+    "localhost:*",
+    "[::1]:*",
+    "gateway:*",
+    "gateway.governance-stack.svc.cluster.local:*",
+    "gateway.governance-stack.svc:*",
+]
+mcp = FastMCP(
+    "CAGE Governed Gateway",
+    transport_security=TransportSecuritySettings(allowed_hosts=_ALLOWED_HOSTS),
+)
+
+
+# ---------------------------------------------------------------------------
+# MCP Tool Definitions
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def simulate_governance_check(
+    target_tool: str, target_params: dict, risk_profile: str = "Medium"
+) -> dict[str, Any]:
+    """Dry-run preview of the governor on a proposed action.
+
+    Calls ``SymbolicGovernor.verify()``, which runs the pipeline under the
+    ``DRY_RUN`` profile: stateless stages run normally and mutating stages
+    (CBF, fiscal, dose/kinematic barriers) run only their side-effect-free
+    ``evaluate()`` preview, so a refusal live execution would issue is
+    reported here too. Nothing is committed, and this tool does not enforce
+    or block execution — enforcement happens when the action is dispatched
+    through ``validate_action`` / ``govern()``.
+
+    ``verdict`` is a :class:`GovernanceDecision` value: ``ALLOW`` iff there
+    are no violations, otherwise the classifier's decision over them. A NARROW
+    here is an unverified candidate, and no approval token is parked for a
+    REQUIRE_APPROVAL; ``POST /governance/validate-action`` does both.
+    """
+    logger.info(
+        "🔍 Simulating governance check for: %s (Risk: %s)", target_tool, risk_profile
+    )
+    vp = {**target_params, "risk_profile": risk_profile}
+    result = await governor_of(app).verify(target_tool, vp)
+    violations = [v.to_dict() for v in result.get("violations", [])]
+    if violations:
+        # An unclassified refusal is a DENY (fail closed).
+        verdict = GovernanceDecision(result.get("decision", GovernanceDecision.DENY))
+    else:
+        verdict = GovernanceDecision.ALLOW
+    return {
+        "verdict": verdict.value,
+        "violations": violations,
+        "opa_results": result.get("opa_results"),
+        "message": "No violations detected."
+        if not violations
+        else "; ".join(f"[{v['code']}] {v['message']}" for v in violations),
+    }
+
+
+async def _evaluate_policy_internal(
+    action: str,
+    amount: float = 0.0,
+    symbol: str = "UNKNOWN",
+    currency: str = "USD",
+    subject_role: str = "junior",
+    user_id: str = "anonymous",
+    risk_profile: str = "neutral",
+    description: str | None = None,
+    dry_run: bool = True,
+    **extra_params: Any,
+) -> str:
+    """Internal OPA policy evaluation helper (no longer an MCP-exposed tool).
+
+    OPA enforcement for the mandatory safety guardrail path is handled
+    directly by ``SymbolicGovernor.govern()`` in the ``safety_check`` node.
+    This function is retained for internal HTTP dispatch use only
+    (``/tools/execute`` endpoint).  It is intentionally NOT registered as an
+    MCP tool so agents cannot invoke OPA evaluation via the tool surface.
+    """
+    # GAP-3 fix: wrap the OPA client call in a parent span so the parameter
+    # marshalling step and OPA decision are visible as siblings in Telemetry,
+    # bridging the gap between the FastAPI HTTP span and the governance.opa_check
+    # child span already emitted by OPAClient.evaluate_policy().
+    with tracer.start_as_current_span("governance.opa_policy_evaluation") as span:
+        span.set_attribute(OBSERVATION_TYPE, "span")
+        span.set_attribute(OBSERVATION_NAME, "opa_policy_eval_internal")
+        span.set_attribute(SPAN_ATTR_OPA_POLICY_PATH, "domain_governance")
+        span.set_attribute("governance.action", action)
+        span.set_attribute("governance.subject_role", subject_role)
+        span.set_attribute("governance.amount", amount)
+
+        logger.info(
+            "Tool Call: evaluate_policy(action=%s, subject_role=%s, amount=%s)",
+            action,
+            subject_role,
+            amount,
+        )
+        params = {
+            "action": action,
+            "amount": amount,
+            "symbol": symbol,
+            "currency": currency,
+            "subject_role": subject_role,
+            "user_id": user_id,
+            "risk_profile": risk_profile,
+            "description": description,
+            "dry_run": dry_run,
+            **extra_params,
+        }
+        try:
+            result = await governor_of(app).components.opa.evaluate_policy(params)
+            result_str = str(result)
+            # Translate OPA decisions to the format safety_check_node expects
+            span.set_attribute("opa.decision", result_str)
+            if result_str == "ALLOW":
+                span.set_attribute("opa.allowed", True)
+                return "APPROVED: action permitted by OPA policy"
+            elif result_str == "MANUAL_REVIEW":
+                span.set_attribute("opa.allowed", False)
+                return "MANUAL_REVIEW: action requires human approval"
+            else:
+                span.set_attribute("opa.allowed", False)
+                return f"DENIED: action blocked by OPA policy (decision={result_str})"
+        except Exception as exc:
+            logger.error("Policy Check Error: %s", exc)
+            span.record_exception(exc)
+            span.set_status(trace.Status(trace.StatusCode.ERROR, str(exc)))
+            span.set_attribute("opa.allowed", False)
+            return "DENIED: policy evaluation error"
+
+
+_SAFETY_INTERVENTION_TTL_SECONDS: int = int(
+    os.getenv("CAGE_SAFETY_INTERVENTION_TTL_SECONDS", "3600")
+)
+
+
+@mcp.tool()
+async def trigger_safety_intervention(reason: str = "Unknown") -> str:
+    """Trigger an immediate safety intervention to lock the system."""
+    from src.gateway.infrastructure.redis_client import redis_client as gw_redis
+
+    if gw_redis is None:
+        logger.error(
+            "❌ SAFETY INTERVENTION FAILED: Redis unavailable; cannot persist lock for: %s",
+            reason,
+        )
+        raise RuntimeError(
+            "FAIL-CLOSED: Redis unavailable; cannot persist safety intervention lock"
+        )
+    setex_fn = getattr(gw_redis, "setex", None)
+    if setex_fn is not None and inspect.iscoroutinefunction(setex_fn):
+        await setex_fn("safety_violation", _SAFETY_INTERVENTION_TTL_SECONDS, reason)
+    else:
+        await gw_redis.set("safety_violation", reason)
+    logger.warning(
+        "🛑 SAFETY INTERVENTION TRIGGERED (ttl=%ds): %s",
+        _SAFETY_INTERVENTION_TTL_SECONDS,
+        reason,
+    )
+    return "INTERVENTION_ACK: System Locked."
+
+
+@mcp.tool()
+async def verify_content_safety(text: str) -> str:
+    """Verify safety of a given text using NeMo Guardrails."""
+    from src.gateway.governance.semantic_rail_factory import (
+        validate_with_semantic_rail as validate_with_nemo,
+    )
+
+    rails = getattr(app.state, "nemo_rails", None)
+    if rails is None:
+        return "ERROR: NeMo rails not initialised."
+    is_safe, response, _deterministic = await validate_with_nemo(text, rails)
+    return "SAFE" if is_safe else f"BLOCKED: {response}"
+
+
+# ---------------------------------------------------------------------------
+# Mount MCP SSE with distributed tracing (Phase 5.2)
+# ---------------------------------------------------------------------------
+
+patch_mcp_tools(mcp)
+logger.info("Mounting MCP SSE App at /mcp (with distributed tracing)...")
+app.mount("/mcp", mcp.sse_app())
+
+
+# ---------------------------------------------------------------------------
+# HTTP tool dispatch (internal use — supports GatewayClient HTTP calls)
+# ---------------------------------------------------------------------------
+
+
+class ToolExecutionRequest(BaseModel):
+    tool_name: str
+    params: dict[str, Any]
+
+    @field_validator("params")
+    @classmethod
+    def _reject_non_finite_floats(cls, v: dict[str, Any]) -> dict[str, Any]:
+        for key, val in v.items():
+            if isinstance(val, float) and not math.isfinite(val):
+                raise ValueError(
+                    f"params[{key!r}] contains non-finite float {val!r} "
+                    "— NaN and Infinity are not permitted"
+                )
+        return v
+
+
+@app.post("/tools/execute")
+async def execute_tool_endpoint(request_body: ToolExecutionRequest, request: Request):  # type: ignore[no-untyped-def]
+    """Execute a named tool via HTTP.
+
+    The caller is authenticated by mesh workload identity before this handler
+    runs (WorkloadIdentityMiddleware on the gateway root app, POAM-2026-080,
+    and enforced directly here as defense-in-depth for GHSA-4x3x-w2m3-8mfh).
+    """
+    from src.gateway.server.workload_identity import (
+        extract_client_identity,
+        load_identity_policy,
+    )
+
+    try:
+        caller_identity = extract_client_identity(request.scope)
+        policy = load_identity_policy()
+    except (ValueError, RuntimeError) as exc:
+        logger.warning(
+            "Gateway /tools/execute refused request without verified workload identity: %s",
+            exc,
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="trusted workload identity required",
+        ) from exc
+    if caller_identity not in policy.trusted:
+        logger.warning(
+            "Gateway /tools/execute refused untrusted workload identity: %s",
+            caller_identity,
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="trusted workload identity required",
+        )
+
+    # M-20: Per-client rate limiting (sliding window)
+    client_ip: str = request.client.host if request.client else "unknown"
+    if not await _check_rate_limit(client_ip):
+        logger.warning("Rate limit exceeded for client %s", client_ip)
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Rate limit exceeded: max {_RATE_LIMIT_MAX_CALLS} calls "
+                f"per {_RATE_LIMIT_WINDOW_SECONDS}s per client."
+            ),
+        )
+
+    # Reconstruct the tool map by calling the registered tools from the MCP server
+    tool_map: dict[str, Any] = {
+        "simulate_governance_check": simulate_governance_check,
+        "trigger_safety_intervention": trigger_safety_intervention,
+        "verify_content_safety": verify_content_safety,
+        "evaluate_policy": _evaluate_policy_internal,
+    }
+
+    # Also grab tools registered to the MCP server directly by plugins
+    # (e.g. execute_trade_action). FastMCP keeps them in its tool manager.
+    for tool in mcp._tool_manager.list_tools():
+        if tool.name not in tool_map:
+            tool_map[tool.name] = tool.fn
+
+    if request_body.tool_name not in tool_map:
+        raise HTTPException(
+            status_code=404, detail=f"Tool '{request_body.tool_name}' not found."
+        )
+
+    func = tool_map[request_body.tool_name]
+    try:
+        if inspect.iscoroutinefunction(func):
+            output = await func(**request_body.params)
+        else:
+            output = await asyncio.to_thread(func, **request_body.params)
+        return {"status": "SUCCESS", "output": str(output)}
+    except Exception as exc:
+        logger.error("Tool Execution Error: %s", exc)
+        return {"status": "ERROR", "error": str(exc)}
+
+
+@app.get("/health")
+async def health_check():  # type: ignore[no-untyped-def]
+    return {"status": "ok", "mode": "mcp-tool-server", "nemo": "active"}
+
+
+# ---------------------------------------------------------------------------
+# Entrypoint
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    import uvicorn
+
+    from src.gateway.infrastructure.telemetry_client import configure_telemetry
+    from src.gateway.server.workload_identity import (
+        WorkloadIdentityMiddleware,
+        load_identity_policy,
+    )
+
+    configure_telemetry()
+    app.add_middleware(WorkloadIdentityMiddleware, policy=load_identity_policy())
+    http_port = int(os.getenv("PORT", "8080"))
+    logging.basicConfig(level=logging.INFO)
+    uvicorn.run(app, host="0.0.0.0", port=http_port)

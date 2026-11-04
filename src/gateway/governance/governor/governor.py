@@ -1,0 +1,1074 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""The governor: runs every entry point through one staged pipeline.
+
+A ``SymbolicGovernor`` is immutable. It is built once, from
+:class:`~src.gateway.governance.governor.assembly.GovernorComponents`, by the
+composition root :func:`~src.gateway.governance.governor.assembly.assemble_governor`.
+Nothing installs tiers, invariants or engines on it after construction.
+"""
+
+from __future__ import annotations
+
+import copy
+import inspect
+import json
+import logging
+import time
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, NoReturn
+
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
+
+from src.gateway.governance.classification_engine import (
+    REASON_RELIANCE_INELIGIBLE,
+    ClassificationContext,
+)
+from src.gateway.governance.constants import ControlRegistry
+from src.gateway.governance.contracts import (
+    GovernanceTier,
+    Violation,
+    ViolationKind,
+)
+from src.gateway.governance.decisions import GovernanceDecision
+from src.gateway.governance.governor.approval import PostHitlApproval
+from src.gateway.governance.governor.errors import GovernanceDeferred, GovernanceError
+from src.gateway.governance.governor.pipeline import (
+    BarrierPreview,
+    PipelineResult,
+    Profile,
+    Stage,
+    StageContext,
+    resolve_claims,
+    run_pipeline,
+)
+from src.gateway.governance.governor.sealing import run_sealed
+from src.gateway.governance.governor.server_inputs import bind_server_inputs
+from src.gateway.governance.governor.settlement import SettlementLedger, settle
+from src.gateway.governance.governor.stages.domain_tiers import order_stages
+from src.gateway.governance.governor.trace import decision_trace_event, publish_trace
+from src.gateway.governance.governor.verdicts import (
+    handle_defer,
+    handle_deny,
+    handle_narrow,
+    handle_post_hitl_defer,
+    handle_require_approval,
+    reported_confidence,
+)
+from src.gateway.governance.narrow_receipt import issue_narrow_receipt
+from src.gateway.governance.warrant.reliance import (
+    reliance_attestations,
+    reliance_evidence,
+)
+from src.gateway.observability.attributes import (
+    OBSERVATION_INPUT,
+    OBSERVATION_NAME,
+    OBSERVATION_OUTPUT,
+    OBSERVATION_TYPE,
+)
+
+if TYPE_CHECKING:
+    from src.gateway.governance.governor.assembly import GovernorComponents
+
+logger = logging.getLogger(__name__)
+tracer = trace.get_tracer(__name__)
+
+
+class SymbolicGovernor:
+    """Immutable governor over one set of assembled components."""
+
+    __slots__ = ("_components", "_settlements", "_stages")
+    _components: GovernorComponents
+    _stages: tuple[Stage, ...]
+    _settlements: SettlementLedger
+
+    def __init__(self, components: GovernorComponents) -> None:
+        # order_stages rejects duplicate tier names and sorts by (phase, order);
+        # jurisdiction tiers sort in with the domain's.
+        stages = (*components.core_stages, *order_stages(components.plugin_tiers))
+        object.__setattr__(self, "_components", components)
+        object.__setattr__(self, "_stages", stages)
+        # The ledger's binding is fixed; its entries are the per-seal commits
+        # awaiting settle().  The governor's configuration stays immutable.
+        object.__setattr__(self, "_settlements", SettlementLedger())
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise AttributeError(f"SymbolicGovernor is immutable; cannot set {name!r}")
+
+    def __delattr__(self, name: str) -> None:
+        raise AttributeError(f"SymbolicGovernor is immutable; cannot delete {name!r}")
+
+    @property
+    def components(self) -> GovernorComponents:
+        return self._components
+
+    @property
+    def stages(self) -> tuple[Stage, ...]:
+        return self._stages
+
+    @property
+    def domain_tiers(self) -> tuple[GovernanceTier, ...]:
+        return tuple(
+            sorted(
+                self._components.domain_tiers,
+                key=lambda t: (t.phase, t.order, t.tier_name),
+            )
+        )
+
+    @property
+    def tiers(self) -> tuple[GovernanceTier, ...]:
+        """Domain and jurisdiction tiers in pipeline order."""
+        return tuple(
+            sorted(
+                self._components.plugin_tiers,
+                key=lambda t: (t.phase, t.order, t.tier_name),
+            )
+        )
+
+    def registered_tier_names(self) -> list[str]:
+        return [t.tier_name for t in self.tiers]
+
+    async def validate_action(
+        self,
+        action: str,
+        params: dict[str, Any],
+        policy_version_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Decide ``action`` without committing anything or minting a seal.
+
+        Runs the DRY_RUN profile: phase-2 (mutating) stages answer through
+        their side-effect-free ``preview()``, so no barrier state moves and no
+        ``ReservationScope`` exists. The verdict (ALLOW, NARROW candidate,
+        REQUIRE_APPROVAL with a ``deferred_id``, DEFER, or DENY via
+        ``GovernanceError``) only routes the caller. The single committing run
+        is :meth:`govern` or, after approval, :meth:`revalidate_post_hitl`.
+
+        The params are bound first (:func:`bind_server_inputs`): caller values
+        for keys a domain resolves server-side are replaced, so the preview
+        evaluates the same inputs as the committing run.
+        """
+        params = await bind_server_inputs(
+            self._components.server_inputs, action, params
+        )
+        with tracer.start_as_current_span("cage.validate_action") as span:
+            span.set_attribute(OBSERVATION_TYPE, "span")
+            span.set_attribute(OBSERVATION_NAME, "governance_validate")
+            span.set_attribute(
+                OBSERVATION_INPUT, json.dumps({"tool": action, "params": params})
+            )
+
+            _check_policy_pin(policy_version_id)
+
+            t0 = time.perf_counter()
+            ctx = StageContext(action=action, params=params, profile=Profile.DRY_RUN)
+            result = await run_pipeline(self.stages, ctx, profile=Profile.DRY_RUN)
+            latency_ms = round((time.perf_counter() - t0) * 1000, 2)
+            span.set_attribute("cage.governance_latency_ms", latency_ms)
+
+            if not result.violations:
+                await _trace(
+                    result,
+                    action,
+                    Profile.DRY_RUN,
+                    "validate_action",
+                    GovernanceDecision.ALLOW,
+                )
+                span.set_attribute("cage.verdict", GovernanceDecision.ALLOW)
+                span.set_attribute(OBSERVATION_OUTPUT, GovernanceDecision.ALLOW)
+                span.set_status(Status(StatusCode.OK))
+                return {
+                    "verdict": GovernanceDecision.ALLOW,
+                    "violations": [],
+                    "latency_ms": latency_ms,
+                    "agent_id": params.get("_caller_principal", ""),
+                    **_context_meta(result),
+                    **_reliance_meta(result),
+                }
+
+            violations = list(result.violations)
+            classification = self._components.classifier.classify(
+                ClassificationContext(
+                    violations=violations,
+                    confidence=reported_confidence(params),
+                    opa_decision=result.opa_verdict.value
+                    if result.opa_verdict
+                    else None,
+                    policy_ambiguous=False,
+                    params=params,
+                ),
+                action,
+            )
+            meta = {
+                **_ftra_meta(result),
+                **_barrier_meta(result),
+                **classification.metadata,
+            }
+            span.set_attribute(
+                "cage.governance.classification_decision", classification.decision.value
+            )
+            span.set_attribute(
+                "cage.governance.classification_reason",
+                str(meta.get("classification_reason", ""))[:200],
+            )
+
+            if classification.decision == GovernanceDecision.NARROW:
+                return await self._narrow_candidate(action, params, result, meta, t0)
+
+            if classification.decision == GovernanceDecision.REQUIRE_APPROVAL:
+                meta = await self._reverified_narrow_hint(action, meta)
+
+            # Unmapped decisions fall through to DENY (fail-closed).
+            handler = _VERDICT_HANDLERS.get(classification.decision, handle_deny)
+            await _trace(
+                result,
+                action,
+                Profile.DRY_RUN,
+                "validate_action",
+                classification.decision
+                if classification.decision in _PENDING_DECISIONS
+                else GovernanceDecision.DENY,
+            )
+            verdict = handler(
+                action,
+                params,
+                violations,
+                list(result.tier_failures),
+                meta,
+                latency_ms,
+                reliance=result.reliance,
+            )
+            resolved = await verdict if inspect.isawaitable(verdict) else verdict
+            return {**resolved, **_context_meta(result)}
+
+    async def _rebind(self, action: str, proposal: dict[str, Any]) -> dict[str, Any]:
+        """A narrower's proposal with its server inputs resolved afresh.
+
+        A proposal copies the request's bound params and clamps some of them;
+        any server input derived from a clamped value would otherwise describe
+        the original request.
+        """
+        return await bind_server_inputs(
+            self._components.server_inputs, action, copy.deepcopy(proposal)
+        )
+
+    async def _reverified_narrow_hint(
+        self, action: str, meta: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Keep the classifier's ``narrow_hint`` only if DRY_RUN vouches for it.
+
+        The hint tells the reviewer which clamped params would clear every
+        barrier, leaving only the approval to give. It is kept iff a DRY_RUN
+        over those params (phase 2 previewed, nothing reserved) reports only
+        HITL findings; otherwise it is dropped, never shown. It authorises
+        nothing: executing it is the committing run, after approval.
+        """
+        hint = meta.get("narrow_hint")
+        if not isinstance(hint, dict):
+            return meta
+        without = {k: v for k, v in meta.items() if k != "narrow_hint"}
+        proposal = hint.get("narrowed_params")
+        if not isinstance(proposal, dict):
+            return without
+        # The exact params the response names, server inputs re-bound so the
+        # derived values describe the clamped request, not the original one.
+        verified = await self._rebind(action, proposal)
+        ctx = StageContext(
+            action=action, params=copy.deepcopy(verified), profile=Profile.DRY_RUN
+        )
+        rerun = await run_pipeline(self.stages, ctx, profile=Profile.DRY_RUN)
+        kept = all(v.kind == ViolationKind.HITL for v in rerun.violations)
+        trace.get_current_span().set_attribute(
+            "cage.governance.narrow_hint_reverified", kept
+        )
+        if not kept:
+            return without
+        return {**without, "narrow_hint": {**hint, "narrowed_params": verified}}
+
+    async def _narrow_candidate(
+        self,
+        action: str,
+        params: dict[str, Any],
+        result: PipelineResult,
+        meta: dict[str, Any],
+        t0: float,
+    ) -> dict[str, Any]:
+        """Offer a narrower's proposal only if the DRY_RUN profile passes on it.
+
+        proof/model.py NARROW (c): the clamped params must pass every stage.
+        The re-check previews phase-2 stages (nothing is reserved) and is never
+        classified, so the narrower runs once per request. No seal is minted:
+        executing the proposal is a separate committing run over it.
+        """
+        proposal = meta.get("narrowed_params")
+        if not isinstance(proposal, dict):
+            await _trace(
+                result,
+                action,
+                Profile.DRY_RUN,
+                "validate_action",
+                GovernanceDecision.DENY,
+            )
+            await _deny(action, params, result)
+        verified = await self._rebind(action, proposal)  # the params the response names
+        ctx = StageContext(
+            action=action, params=copy.deepcopy(verified), profile=Profile.DRY_RUN
+        )
+        rerun = await run_pipeline(self.stages, ctx, profile=Profile.DRY_RUN)
+        latency_ms = round((time.perf_counter() - t0) * 1000, 2)
+        reverified = not rerun.violations
+        await _trace(
+            result,
+            action,
+            Profile.DRY_RUN,
+            "validate_action",
+            GovernanceDecision.NARROW if reverified else GovernanceDecision.DENY,
+            narrower_present=True,
+            clamped_params_valid=reverified,
+        )
+        trace.get_current_span().set_attribute(
+            "cage.governance.narrow_reverified", reverified
+        )
+        if not reverified:
+            if self._defers_on_reliance(rerun):
+                return {
+                    **(
+                        await handle_defer(
+                            action,
+                            verified,
+                            list(rerun.violations),
+                            list(rerun.tier_failures),
+                            {**meta, **_ftra_meta(rerun), **_RELIANCE_DEFER_META},
+                            latency_ms,
+                            reliance=rerun.reliance,
+                        )
+                    ),
+                    **_context_meta(rerun),
+                }
+            deny_meta = {
+                **meta,
+                **_ftra_meta(rerun),
+                "classification_reason": "narrow_reverification_failed",
+            }
+            await handle_deny(
+                action,
+                verified,
+                list(rerun.violations),
+                list(rerun.tier_failures),
+                deny_meta,
+                latency_ms,
+                reliance=rerun.reliance,
+            )
+            raise GovernanceError(
+                f"handle_deny returned without raising; refusing {action}"
+            )  # fail closed
+        # The envelope attests the warrants the *re-verified* params relied on.
+        return {
+            **handle_narrow(
+                action,
+                params,
+                verified,
+                violations=list(result.violations),
+                classification_meta=meta,
+                latency_ms=latency_ms,
+            ),
+            **_context_meta(rerun),
+            **_reliance_meta(rerun),
+        }
+
+    async def govern(self, tool_name: str, params: dict[str, Any]) -> str:
+        """The committing run: commit phase 2 and seal, or refuse.
+
+        Returns the seal. When the run refuses with only NARROWABLE findings
+        and a narrower proposes clamped params, the seal covers *those*
+        params instead (see :meth:`_sealed_narrow`) and a NARROW receipt
+        names them. Any other refusal raises ``GovernanceError``.
+
+        ``params`` is snapshotted on entry: the stages, the evidence event and
+        the seal all name that snapshot, never the caller's live dict. Without
+        it, a concurrent holder of the same dict could change a value during
+        the evidence-commit await, so the seal would name params no stage had
+        evaluated (issue #379). The stages get their own copy, as on the
+        narrow path, so a stage cannot mutate what is sealed either.
+        """
+        sealed = copy.deepcopy(params)
+        with tracer.start_as_current_span("symbolic_governor.govern") as span:
+            span.set_attribute(OBSERVATION_TYPE, "span")
+            span.set_attribute(OBSERVATION_NAME, "governance_evaluation")
+            span.set_attribute(
+                OBSERVATION_INPUT, json.dumps({"tool": tool_name, "params": sealed})
+            )
+
+            ctx = StageContext(
+                action=tool_name, params=copy.deepcopy(sealed), profile=Profile.FULL
+            )
+            result, seal = await run_sealed(
+                self.stages, ctx, sealed, path="govern", settlements=self._settlements
+            )
+            if seal is None:
+                seal = await self._sealed_narrow(tool_name, sealed, result)
+            else:
+                await _trace(
+                    result,
+                    tool_name,
+                    Profile.FULL,
+                    "govern",
+                    GovernanceDecision.ALLOW,
+                    seal=seal,
+                )
+            span.set_attribute("cage.seal_issued", True)
+            span.set_attribute(OBSERVATION_OUTPUT, GovernanceDecision.ALLOW)
+            return seal
+
+    async def _sealed_narrow(
+        self, action: str, params: dict[str, Any], result: PipelineResult
+    ) -> str:
+        """Seal a narrower's proposal in the committing path, or deny.
+
+        proof/model.py NARROW: (a) every violation NARROWABLE and (b) a
+        narrower proposal — both decided by the classifier — and (c) the
+        clamped params pass a fresh FULL run, which commits and seals them.
+        The re-run is never classified, so the narrower runs once. The NARROW
+        receipt is stored inside that run's ``ReservationScope``: if it
+        cannot be stored, the commits are rolled back and the request denied.
+        """
+        if self._defers_on_reliance(result):
+            # A warrant failure removes reliance on the norm; it never becomes
+            # a DENY of its own (proof/model.py verdict_of). An independent
+            # HARD finding still denies: the classifier ranks HARD first.
+            await _trace(
+                result, action, Profile.FULL, "govern", GovernanceDecision.DEFER
+            )
+            await _defer_commit(action, params, result)
+        classification = self._components.classifier.classify(
+            ClassificationContext(
+                violations=list(result.violations),
+                confidence=reported_confidence(params),
+                opa_decision=result.opa_verdict.value if result.opa_verdict else None,
+                policy_ambiguous=False,
+                params=params,
+            ),
+            action,
+        )
+        proposal = classification.metadata.get("narrowed_params")
+        if classification.decision != GovernanceDecision.NARROW or not isinstance(
+            proposal, dict
+        ):
+            await _trace(
+                result, action, Profile.FULL, "govern", GovernanceDecision.DENY
+            )
+            await _deny(action, params, result)
+        # The exact params the seal and receipt name, server inputs re-bound.
+        narrowed = await self._rebind(action, proposal)
+
+        async def _deliver(seal: str) -> None:
+            await issue_narrow_receipt(
+                seal,
+                narrowed,
+                constraints_applied=classification.metadata.get(
+                    "constraints_applied", []
+                ),
+                narrowing_reason=str(
+                    classification.metadata.get("narrowing_reason", "")
+                ),
+            )
+
+        ctx = StageContext(
+            action=action, params=copy.deepcopy(narrowed), profile=Profile.FULL
+        )
+        rerun, seal = await run_sealed(
+            self.stages,
+            ctx,
+            narrowed,
+            path="govern_narrow",
+            settlements=self._settlements,
+            on_seal=_deliver,
+        )
+        span = trace.get_current_span()
+        span.set_attribute("cage.governance.narrow_reverified", seal is not None)
+        # The model's NARROW state records where the *original* run failed.
+        await _trace(
+            result,
+            action,
+            Profile.FULL,
+            "govern_narrow",
+            GovernanceDecision.NARROW if seal is not None else GovernanceDecision.DENY,
+            seal=seal,
+            narrower_present=True,
+            clamped_params_valid=seal is not None,
+        )
+        if seal is None:
+            if self._defers_on_reliance(rerun):
+                await _defer_commit(action, narrowed, rerun)
+            await handle_deny(
+                action,
+                narrowed,
+                list(rerun.violations),
+                list(rerun.tier_failures),
+                {
+                    **_ftra_meta(rerun),
+                    "classification_reason": "narrow_reverification_failed",
+                },
+                reliance=rerun.reliance,
+            )
+            raise GovernanceError(
+                f"handle_deny returned without raising; refusing {action}"
+            )  # fail closed
+        span.set_attribute("cage.verdict", GovernanceDecision.NARROW)
+        return seal
+
+    async def revalidate_post_hitl(
+        self,
+        action: str,
+        params: dict[str, Any],
+        *,
+        approval: PostHitlApproval,
+        rebind_inputs: bool = False,
+    ) -> str:
+        """The post-approval committing run: POST_HITL commit + seal, or not.
+
+        ``approval`` is the verified, unspent human approval
+        (:class:`~.approval.PostHitlApproval`). When ``rebind_inputs=True``,
+        server-owned keys (e.g., quote staleness, drawdown, portfolio NAV) are
+        resolved afresh via :func:`bind_server_inputs` before ``OpaStage`` and
+        phase-2 barriers execute, preventing stale telemetry across the human
+        review window. The run decides first and spends second:
+
+        * **ALLOW** — the run is clean; ``approval.spend()`` consumes the
+          approval atomically inside the run's ``ReservationScope``, before
+          the seal is minted. If it was already spent (a replay or a
+          concurrent redemption won), the run is refused
+          ``[APPROVAL_NOT_REDEEMABLE]``, nothing is sealed and every commit
+          rolls back: at most one redemption seals.
+        * **DEFER** — the only findings are ``RELIANCE_INELIGIBLE`` (a
+          warranted norm lost its warrant while the human decided). Nothing
+          is sealed or committed, and the approval is **not** spent: the
+          deferral is hash-chained naming it, and
+          :class:`~.errors.GovernanceDeferred` is raised. The same approval
+          redeems once the warrant is eligible again (POAM-2026-104).
+        * **DENY** — any other finding. The approval is spent, then the run
+          is refused, so the operator must approve a fresh request.
+
+        The approval covers only the context it was given against
+        (``approval.barrier_preview``, bound into every ``ApprovalRecord`` by
+        ``DeferQueue.approve``): if the reviewer was told the barriers would
+        PASS and the committing run's barriers now refuse, the refusal is
+        ``[APPROVAL_CONTEXT_DRIFT]``. An unrecognised snapshot is refused
+        before anything runs. An approval given against ``FAIL`` (e.g. of a
+        ``narrow_hint``'s clamped params) is honoured only if the barriers
+        now admit the executed params.
+        """
+        if rebind_inputs:
+            params = await bind_server_inputs(
+                self._components.server_inputs, action, params
+            )
+        with tracer.start_as_current_span(
+            "symbolic_governor.revalidate_post_hitl"
+        ) as span:
+            span.set_attribute(OBSERVATION_TYPE, "span")
+            span.set_attribute(OBSERVATION_NAME, "governance_revalidate_post_hitl")
+            span.set_attribute(
+                OBSERVATION_INPUT, json.dumps({"tool": action, "params": params})
+            )
+            span.set_attribute("toctou.revalidation.scope", "opa+warrant+phase2")
+            span.set_attribute("toctou.server_inputs_rebound", rebind_inputs)
+            span.set_attribute("toctou.approval_id", approval.approval_id)
+            if approval.thread_id is not None:
+                span.set_attribute("toctou.revalidation.trace_id", approval.thread_id)
+            try:
+                approved = _parse_barrier_snapshot(approval.barrier_preview)
+            except ValueError:
+                await _spend_refused(approval)
+                await handle_deny(
+                    action,
+                    params,
+                    [
+                        _approval_drift(
+                            f"unrecognised approval snapshot {approval.barrier_preview!r}"
+                        )
+                    ],
+                    [],
+                    {"approved_barrier_preview": str(approval.barrier_preview)},
+                )
+                raise GovernanceError(
+                    f"handle_deny returned without raising; refusing {action}"
+                )  # fail closed
+            span.set_attribute(
+                "toctou.approved_barrier_preview", approved.value if approved else ""
+            )
+            if not self._is_governed_action(action, params):
+                # POST_HITL re-runs only claimed barriers; with none there is
+                # nothing to re-verify, so the approval cannot be honoured.
+                await _spend_refused(approval)
+                await handle_deny(action, params, [_UNGOVERNED_POST_HITL], [], {})
+                raise GovernanceError(
+                    f"no tier governs {action}; post-HITL re-validation refused"
+                )
+            ctx = StageContext(action=action, params=params, profile=Profile.POST_HITL)
+            # The approval is spent only by the run it authorises: admit()
+            # runs after every stage passed and before the seal is minted.
+            result, seal = await run_sealed(
+                self.stages,
+                ctx,
+                params,
+                path="revalidate_post_hitl",
+                settlements=self._settlements,
+                admit=approval.spend,
+            )
+            if result.barrier_outcome is not None:
+                span.set_attribute(
+                    "toctou.barrier_outcome", result.barrier_outcome.value
+                )
+            if seal is not None:
+                span.set_attribute("toctou.approval_spent", True)
+                await _trace(
+                    result,
+                    action,
+                    Profile.POST_HITL,
+                    "revalidate_post_hitl",
+                    GovernanceDecision.ALLOW,
+                    seal=seal,
+                )
+                return seal
+            if not result.violations:
+                # Clean, but the approval could not be spent: replayed, lost a
+                # concurrent redemption, expired or no longer covering.
+                span.set_attribute("toctou.approval_spent", False)
+                await _trace(
+                    result,
+                    action,
+                    Profile.POST_HITL,
+                    "revalidate_post_hitl",
+                    GovernanceDecision.DENY,
+                )
+                await handle_deny(
+                    action,
+                    params,
+                    [_approval_not_redeemable(approval.approval_id)],
+                    [],
+                    {"approval_id": approval.approval_id},
+                    reliance=result.reliance,
+                )
+                raise GovernanceError(
+                    f"handle_deny returned without raising; refusing {action}"
+                )  # fail closed
+            if self._defers_on_reliance(result):
+                span.set_attribute("toctou.approval_spent", False)
+                await _trace(
+                    result,
+                    action,
+                    Profile.POST_HITL,
+                    "revalidate_post_hitl",
+                    GovernanceDecision.DEFER,
+                )
+                await handle_post_hitl_defer(
+                    action,
+                    params,
+                    list(result.violations),
+                    dict(_RELIANCE_DEFER_META),
+                    approval_id=approval.approval_id,
+                    thread_id=approval.thread_id,
+                    barrier_preview=approval.barrier_preview,
+                    reliance=result.reliance,
+                )
+            await _spend_refused(approval)
+            span.set_attribute("toctou.approval_spent", True)
+            await _trace(
+                result,
+                action,
+                Profile.POST_HITL,
+                "revalidate_post_hitl",
+                GovernanceDecision.DENY,
+            )
+            if (
+                approved == BarrierPreview.PASS
+                and result.barrier_outcome == BarrierPreview.FAIL
+            ):
+                await _deny_drift(action, params, result, approved)
+            await _deny(action, params, result)
+
+    def _defers_on_reliance(self, result: PipelineResult) -> bool:
+        """True iff the run's findings defer on an ineligible warrant.
+
+        Asks the classifier's side-effect-free
+        :meth:`~src.gateway.governance.classification_engine.ClassificationEngine.defers_on_reliance`
+        (no narrower runs), so every committing path agrees with
+        :meth:`validate_action`'s classification: ``RELIANCE_INELIGIBLE``
+        without a HARD finding is a DEFER; a HARD finding still denies.
+        """
+        return self._components.classifier.defers_on_reliance(result.violations)
+
+    async def settle(self, seal: str, *, executed: bool) -> list[Violation]:
+        """Settle the phase-2 commits behind ``seal`` after the sealed action.
+
+        Call once the action has run (``executed=True``: every mutating tier
+        confirms its reservation) or definitively has not (``executed=False``:
+        every reservation is released, last in first out).  Returns one HARD
+        ``CONFIRM_FAILED`` / ``ROLLBACK_FAILED`` violation per failed hook;
+        those need manual reconciliation.
+
+        Idempotent: a seal with no held commits (none were made, it was
+        already settled, or it outlived the ledger's hold window) settles to
+        ``[]``.  A seal that is never settled is left to each tier's own
+        expiry; see :mod:`.settlement`.
+        """
+        with tracer.start_as_current_span("symbolic_governor.settle") as span:
+            commits = self._settlements.take(seal)
+            span.set_attribute("cage.settlement.executed", executed)
+            span.set_attribute("cage.settlement.commit_count", len(commits))
+            failures = await settle(commits, executed=executed)
+            span.set_attribute("cage.settlement.failure_count", len(failures))
+            if failures:
+                span.set_status(Status(StatusCode.ERROR, "settlement failed"))
+                logger.critical(
+                    "settlement (executed=%s) failed for %s; manual reconciliation required",
+                    executed,
+                    ", ".join(v.tier for v in failures),
+                )
+            return failures
+
+    async def verify(self, tool_name: str, params: dict[str, Any]) -> dict[str, Any]:
+        """Dry-run the pipeline and classify it; commit, park and seal nothing.
+
+        ``decision`` is ``ALLOW`` iff there are no violations, otherwise the
+        classifier's decision over them. Unlike :meth:`validate_action` no
+        NARROW proposal is re-verified and no approval token is parked.
+        Params are bound as in :meth:`validate_action`.
+        """
+        params = await bind_server_inputs(
+            self._components.server_inputs, tool_name, params
+        )
+        with tracer.start_as_current_span("symbolic_governor.verify") as span:
+            span.set_attribute(OBSERVATION_TYPE, "span")
+            span.set_attribute(OBSERVATION_NAME, "governance_simulation")
+            span.set_attribute(
+                OBSERVATION_INPUT, json.dumps({"tool": tool_name, "params": params})
+            )
+
+            # DRY_RUN never commits, so no ReservationScope: run_pipeline refuses one.
+            ctx = StageContext(action=tool_name, params=params, profile=Profile.DRY_RUN)
+            result = await run_pipeline(self.stages, ctx, profile=Profile.DRY_RUN)
+
+            violations = list(result.violations)
+            decision = GovernanceDecision.ALLOW
+            if violations:
+                decision = self._components.classifier.classify(
+                    ClassificationContext(
+                        violations=violations,
+                        confidence=reported_confidence(params),
+                        opa_decision=result.opa_verdict.value
+                        if result.opa_verdict
+                        else None,
+                        policy_ambiguous=False,
+                        params=params,
+                    ),
+                    tool_name,
+                ).decision
+            span.set_attribute("cage.verdict", decision.value)
+            span.set_attribute(
+                OBSERVATION_OUTPUT,
+                json.dumps(
+                    [
+                        {
+                            "tier": v.tier,
+                            "code": v.code,
+                            "message": v.message,
+                            "kind": v.kind.value,
+                        }
+                        for v in violations
+                    ]
+                )
+                if violations
+                else GovernanceDecision.ALLOW,
+            )
+            return {
+                "decision": decision,
+                "violations": violations,
+                "tier_failures": list(result.tier_failures),
+                "opa_results": result.opa_verdict,
+                "pending_payload": None,
+                "ftra_boundary_result": result.ftra,
+                "tier_violations": violations,
+            }
+
+    def _is_governed_action(self, action: str, params: dict[str, Any]) -> bool:
+        """True if any domain or jurisdiction stage claims ``action``.
+
+        Delegates to :func:`resolve_claims` — the function ``run_pipeline``
+        uses — so the two agree by construction.  A stage whose claim raises
+        counts as claiming it (fail closed): the pipeline then records the
+        raise as a HARD TIER_EXCEPTION.
+        """
+        ctx = StageContext(action=action, params=params, profile=Profile.POST_HITL)
+        return resolve_claims(self.stages, ctx).governed
+
+
+_UNGOVERNED_POST_HITL = Violation(
+    tier="kernel",
+    code="UNGOVERNED_POST_HITL",
+    kind=ViolationKind.HARD,
+    message="post-HITL re-validation requested for an action no domain tier claims",
+)
+
+APPROVAL_CONTEXT_DRIFT = "APPROVAL_CONTEXT_DRIFT"
+APPROVAL_NOT_REDEEMABLE = "APPROVAL_NOT_REDEEMABLE"
+
+
+def _approval_not_redeemable(approval_id: str) -> Violation:
+    return Violation(
+        tier="kernel",
+        code=APPROVAL_NOT_REDEEMABLE,
+        kind=ViolationKind.HARD,
+        message=(
+            f"[{APPROVAL_NOT_REDEEMABLE}] approval {approval_id!r} was already "
+            "spent, expired or no longer covers the request; nothing was sealed"
+        ),
+    )
+
+
+#: Classification metadata of a warrant-ineligible DEFER (``handle_defer``
+#: maps it to ``DeferReason.WARRANT_INELIGIBLE``).
+_RELIANCE_DEFER_META: dict[str, Any] = {
+    "classification_reason": REASON_RELIANCE_INELIGIBLE,
+    "deferrable": True,
+}
+
+
+async def _defer_commit(
+    action: str, params: dict[str, Any], result: PipelineResult
+) -> NoReturn:
+    """DEFER a committing run on an ineligible warrant: park, evidence, raise.
+
+    Nothing was sealed and the run's commits were rolled back. The request
+    parks as a ``WARRANT_INELIGIBLE`` token with its reliance records, and
+    the ``GOVERNANCE_DEFERRAL`` event is hash-chained (``handle_defer``,
+    exactly as for a DEFER preview). No refusal receipt is issued.
+
+    Raises:
+        GovernanceDeferred: Always, naming the parked token.
+    """
+    verdict = await handle_defer(
+        action,
+        params,
+        list(result.violations),
+        list(result.tier_failures),
+        {**_ftra_meta(result), **_RELIANCE_DEFER_META},
+        reliance=result.reliance,
+    )
+    findings = [f"[{v.code}] {v.message}" for v in result.violations]
+    raise GovernanceDeferred(
+        f"[{verdict['defer_reason']}] committing run deferred as "
+        f"{verdict['defer_token']!r}: " + "; ".join(findings),
+        defer_reason=str(verdict["defer_reason"]),
+        deferred_id=str(verdict["defer_token"]),
+        reliance=list(verdict.get("reliance", [])),
+        violations=findings,
+    )
+
+
+async def _spend_refused(approval: PostHitlApproval) -> None:
+    """Spend the approval of a run about to be refused (DENY burns it).
+
+    Best effort: the run is refused either way, so a failed spend only
+    leaves an approval that the committing run's own spend would still
+    re-check before any seal.
+    """
+    try:
+        if not await approval.spend():
+            logger.info(
+                "approval %s was already spent when its run was refused",
+                approval.approval_id,
+            )
+    except Exception as exc:  # the refusal stands regardless
+        logger.error(
+            "could not spend approval %s of a refused run: %s",
+            approval.approval_id,
+            exc,
+        )
+
+
+def _parse_barrier_snapshot(
+    value: BarrierPreview | str | None,
+) -> BarrierPreview | None:
+    """The approval's barrier snapshot; ``ValueError`` if it is not PASS/FAIL/None."""
+    return None if value is None else BarrierPreview(value)
+
+
+def _approval_drift(detail: str) -> Violation:
+    return Violation(
+        tier="kernel",
+        code=APPROVAL_CONTEXT_DRIFT,
+        kind=ViolationKind.HARD,
+        message=f"[{APPROVAL_CONTEXT_DRIFT}] {detail}",
+    )
+
+
+async def _deny_drift(
+    action: str,
+    params: dict[str, Any],
+    result: PipelineResult,
+    approved: BarrierPreview,
+) -> NoReturn:
+    """Refuse a committing run whose barriers no longer match the approval.
+
+    The drift violation leads (it decided the refusal); the barrier findings
+    follow, so the receipt still names what now refuses.
+    """
+    cause = next(
+        (v.message for v in result.violations if v.kind == ViolationKind.HARD),
+        "phase-2 barriers refused",
+    )
+    drift = _approval_drift(
+        f"approved against barrier preview {approved.value}, but the committing "
+        f"run's barriers now refuse: {cause}"
+    )
+    await handle_deny(
+        action,
+        params,
+        [drift, *result.violations],
+        list(result.tier_failures),
+        {
+            **_ftra_meta(result),
+            "classification_reason": "approval_context_drift",
+            "approved_barrier_preview": approved.value,
+            "barrier_outcome": BarrierPreview.FAIL.value,
+        },
+        reliance=result.reliance,
+    )
+    raise GovernanceError(
+        f"handle_deny returned without raising; refusing {action}"
+    )  # fail closed
+
+
+#: Decisions that park the request instead of refusing it (model phase CHECKING).
+_PENDING_DECISIONS = frozenset(
+    {GovernanceDecision.REQUIRE_APPROVAL, GovernanceDecision.DEFER}
+)
+
+
+async def _trace(
+    result: PipelineResult,
+    action: str,
+    profile: Profile,
+    path: str,
+    verdict: GovernanceDecision,
+    *,
+    seal: str | None = None,
+    narrower_present: bool = False,
+    clamped_params_valid: bool = False,
+) -> None:
+    """Publish this decision's ``GOVERNANCE_TRACE`` event (best effort)."""
+    await publish_trace(
+        decision_trace_event(
+            result,
+            action=action,
+            profile=profile,
+            path=path,
+            verdict=verdict.value,
+            seal=seal,
+            narrower_present=narrower_present,
+            clamped_params_valid=clamped_params_valid,
+        )
+    )
+
+
+_VERDICT_HANDLERS: dict[GovernanceDecision, Callable[..., Any]] = {
+    GovernanceDecision.DENY: handle_deny,
+    GovernanceDecision.REQUIRE_APPROVAL: handle_require_approval,
+    GovernanceDecision.DEFER: handle_defer,
+    # NARROW is not here: SymbolicGovernor._narrow_candidate() re-verifies it.
+}
+
+
+async def _deny(
+    action: str, params: dict[str, Any], result: PipelineResult
+) -> NoReturn:
+    await handle_deny(
+        action,
+        params,
+        list(result.violations),
+        list(result.tier_failures),
+        _ftra_meta(result),
+        reliance=result.reliance,
+    )
+    raise GovernanceError(
+        f"handle_deny returned without raising; refusing {action}"
+    )  # fail closed
+
+
+def _check_policy_pin(policy_version_id: str | None) -> None:
+    """Reject a session pinned to a policy baseline that has since drifted."""
+    if policy_version_id is None:
+        return
+    active_hash = ControlRegistry().active_hash
+    if policy_version_id != active_hash:
+        raise GovernanceError(
+            f"Substrate Policy Drift Detected. Session pinned to version signature "
+            f"'{policy_version_id}', but active runtime baseline has evolved to hash '{active_hash}'."
+        )
+
+
+def _ftra_meta(result: Any) -> dict[str, Any]:
+    if not result.ftra:
+        return {}
+    return {
+        "terminal_classification": result.ftra.classification,
+        "requires_hitl": result.ftra.requires_hitl,
+        "bypassed_ftra_node": result.ftra.bypassed_ftra_node,
+        "in_registry": result.ftra.terminal_match is not None,
+        "ftra_registry_state": (
+            result.ftra.registry_state.value if result.ftra.registry_state else None
+        ),
+        "ftra_auto_cleared": result.ftra.auto_cleared,
+    }
+
+
+def _reliance_meta(result: PipelineResult) -> dict[str, Any]:
+    """Warrant evidence for an admissible (ALLOW / NARROW) response.
+
+    ``reliance`` is the evidence form of every warranted norm the run relied
+    on; ``external_attestations`` the matching ``WARRANT`` attestations
+    (always ``UNVERIFIED``) that the gateway signs into the governance
+    envelope. Both are absent when no warranted norm governs the action.
+    """
+    if not result.reliance:
+        return {}
+    return {
+        "reliance": reliance_evidence(result.reliance),
+        "external_attestations": reliance_attestations(result.reliance),
+    }
+
+
+def _barrier_meta(result: PipelineResult) -> dict[str, Any]:
+    """What the phase-2 preview said, for the reviewer (absent if none ran).
+
+    ``barrier_preview`` is ``PASS`` or ``FAIL``; on ``FAIL`` the breaches an
+    approved request would hit are listed (e.g. "would breach daily cap").
+    """
+    if result.barrier_preview is None:
+        return {}
+    return {
+        "barrier_preview": result.barrier_preview.value,
+        "barrier_preview_violations": [v.to_dict() for v in result.preview_violations],
+    }
+
+
+def _context_meta(result: PipelineResult) -> dict[str, Any]:
+    """Stage outcomes for the governance envelope context."""
+    return {
+        "tiers_passed": [
+            name for name, outcome in result.stage_outcomes if outcome == "PASS"
+        ],
+    }

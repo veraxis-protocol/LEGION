@@ -1,0 +1,560 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""
+Shared Redis client for the gateway package.
+
+This is the canonical Redis client for all gateway-internal modules
+(safety.py, symbolic_governor, etc.).  It wraps redis.asyncio to provide
+convenience helpers used by ControlBarrierFunction.
+
+Environment variables:
+    REDIS_HOST         — default "localhost"
+    REDIS_PORT         — default 6379
+    REDIS_DB           — default 0
+    REDIS_PASSWORD     — optional
+    REDIS_TLS          — set to "true" to use rediss:// (TLS). Also auto-enabled
+                         when REDIS_URL starts with "rediss://". Server
+                         certificates are verified (ssl.CERT_REQUIRED) under
+                         every enforcing posture (is_enforcing()) or whenever a
+                         readable REDIS_CA_CERT_PATH exists; ssl.CERT_NONE is
+                         used only in dev/test/ci without a readable CA file.
+    REDIS_CA_CERT_PATH — optional path to the pinned server CA PEM bundle
+                         (e.g. /etc/cage/tls/redis/ca.pem for Memorystore).
+"""
+
+import asyncio
+import json
+import logging
+import os
+import ssl
+from typing import Any
+
+from src.gateway.governance.env_posture import is_enforcing, resolve_posture
+
+logger = logging.getLogger("Gateway.Infrastructure.Redis")
+
+_DEBIAN_CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
+
+
+def _default_ca_bundle() -> str:
+    """Return an existing system CA bundle path (Debian path first, then OpenSSL default)."""
+    if os.path.exists(_DEBIAN_CA_BUNDLE):
+        return _DEBIAN_CA_BUNDLE
+    default_cafile = ssl.get_default_verify_paths().cafile
+    if default_cafile and os.path.exists(default_cafile):
+        return default_cafile
+    return _DEBIAN_CA_BUNDLE
+
+
+def resolve_redis_tls(use_tls: bool) -> tuple[ssl.VerifyMode, str | None]:
+    """Resolve ``(ssl_cert_reqs, ssl_ca_certs)`` for a Redis connection.
+
+    Certificates are verified (``ssl.CERT_REQUIRED``) under every enforcing
+    posture (:func:`is_enforcing`) or whenever a readable ``REDIS_CA_CERT_PATH``
+    exists; ``ssl.CERT_NONE`` is used only for ``dev``/``test``/``ci`` without
+    a readable CA file.
+    """
+    if not use_tls:
+        return ssl.CERT_NONE, None
+
+    ca_path = os.environ.get("REDIS_CA_CERT_PATH")
+    posture = resolve_posture()
+    if is_enforcing(posture) or (ca_path and os.path.exists(ca_path)):
+        ca_certs = ca_path or _default_ca_bundle()
+        logger.info("🔒 Redis TLS: cert_reqs=REQUIRED ca=%s", ca_certs)
+        return ssl.CERT_REQUIRED, ca_certs
+
+    logger.warning("⚠️ Redis TLS: cert_reqs=NONE (posture=%s)", posture.value)
+    return ssl.CERT_NONE, None
+
+
+class TransactionAbortedError(Exception):
+    """Raised when a Redis WATCH/MULTI/EXEC transaction is aborted due to a
+    concurrent modification of a watched key (WatchError).
+
+    Callers should treat this as a retriable condition: the watched key was
+    modified by another writer between the WATCH and EXEC calls, so the
+    transaction was rolled back atomically by Redis.  Any staging keys written
+    *before* the MULTI block have been explicitly deleted by the client before
+    this exception is raised, leaving Redis in a clean state.
+    """
+
+
+try:
+    from urllib.parse import unquote as _unquote
+    from urllib.parse import urlparse as _urlparse
+
+    import redis
+    import redis.asyncio as aioredis
+
+    _REDIS_URL = os.environ.get("REDIS_URL", "")
+    _REDIS_DB = int(os.environ.get("REDIS_DB", "0"))
+
+    # Parse defaults from REDIS_URL if present, then allow REDIS_HOST/REDIS_PORT overrides
+    if _REDIS_URL:
+        _parsed_url = _urlparse(_REDIS_URL)
+        _url_host: str = _parsed_url.hostname or "localhost"
+        _url_port: int = _parsed_url.port or 6379
+        # CRIT fix: REDIS_URL commonly carries the password as the URL
+        # password component (redis://:<password>@host:port), but this
+        # module previously only read a standalone REDIS_PASSWORD env var
+        # and silently dropped any password embedded in REDIS_URL. In
+        # deployments that only set REDIS_URL (not a separate
+        # REDIS_PASSWORD), this caused every Redis command from this
+        # client to be sent unauthenticated, surfacing as
+        # "NOAUTH Authentication required." at call time — e.g. in the
+        # CBF's read_verified_balance() path — even though a manual
+        # redis.from_url(REDIS_URL) connection (which parses the password
+        # correctly) succeeds.
+        _url_password: str | None = (
+            _unquote(_parsed_url.password) if _parsed_url.password else None
+        )
+    else:
+        _url_host = "localhost"
+        _url_port = 6379
+        _url_password = None
+
+    _REDIS_PASSWORD: str | None = os.environ.get("REDIS_PASSWORD") or _url_password
+
+    _REDIS_HOST = os.environ.get("REDIS_HOST", _url_host)
+    _raw_port = os.environ.get("REDIS_PORT", "")
+    if _raw_port:
+        try:
+            _REDIS_PORT = int(_raw_port)
+        except ValueError:
+            _REDIS_PORT = _url_port
+    else:
+        _REDIS_PORT = _url_port
+
+    # HIGH-04: TLS detection — enabled when REDIS_TLS=true OR REDIS_URL uses rediss://
+    _REDIS_TLS: bool = os.environ.get("REDIS_TLS", "").lower() in (
+        "true",
+        "1",
+        "yes",
+    ) or _REDIS_URL.startswith("rediss://")
+    _REDIS_SSL_CERT_REQS, _REDIS_CA_CERT_PATH = resolve_redis_tls(_REDIS_TLS)
+
+    class _AsyncRedisClient:
+        """Thin async Redis wrapper matching the interface expected by safety.py."""
+
+        def __init__(self):  # type: ignore[no-untyped-def]
+            self._client: aioredis.Redis | None = None
+            self._loop: asyncio.AbstractEventLoop | None = None
+            self._lock: asyncio.Lock | None = None
+
+        def _get_lock(self) -> asyncio.Lock:
+            """Return (or lazily create) an asyncio.Lock bound to the current event loop.
+
+            The lock must be created within an async context to be bound to the
+            correct event loop.
+            """
+            try:
+                current_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                current_loop = None
+
+            # Create a new lock if we don't have one or if the event loop changed
+            if self._lock is None or (
+                self._loop is not None and self._loop != current_loop
+            ):
+                self._lock = asyncio.Lock()
+            return self._lock
+
+        async def _get(self) -> aioredis.Redis:
+            """Return (or lazily create) the Redis client.
+
+            Thread-safe via double-check locking pattern with asyncio.Lock to prevent
+            multiple concurrent async tasks from racing during initialization.
+            """
+            try:
+                current_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                current_loop = None
+
+            # Fast path: client exists and is valid
+            if (
+                self._client is not None
+                and (self._loop is None or self._loop == current_loop)
+                and (self._loop is None or not self._loop.is_closed())
+            ):
+                return self._client
+
+            # Resolve credential provider (e.g. IAM auth for Memorystore)
+            from src.gateway.infrastructure.redis_credential_factory import (
+                get_redis_credential_provider,
+            )
+
+            cred_provider = get_redis_credential_provider()
+            effective_password = None if cred_provider is not None else _REDIS_PASSWORD
+
+            # Slow path: need to create client, use lock to prevent races
+            async with self._get_lock():
+                # Double-check inside lock
+                if (
+                    self._client is None
+                    or (self._loop is not None and self._loop != current_loop)
+                    or (self._loop is not None and self._loop.is_closed())
+                ):
+                    self._loop = current_loop
+                    self._client = aioredis.Redis(
+                        host=_REDIS_HOST,
+                        port=_REDIS_PORT,
+                        db=_REDIS_DB,
+                        password=effective_password,
+                        credential_provider=cred_provider,
+                        decode_responses=True,
+                        socket_connect_timeout=3.0,
+                        socket_timeout=3.0,
+                        ssl=_REDIS_TLS,
+                        ssl_cert_reqs=_REDIS_SSL_CERT_REQS,
+                        ssl_ca_certs=_REDIS_CA_CERT_PATH,
+                    )
+            return self._client
+
+        async def get(self, key: str) -> str | None:
+            client = await self._get()
+            return await client.get(key)
+
+        async def set(self, key: str, value: str) -> None:
+            client = await self._get()
+            await client.set(key, value)
+
+        async def setex(self, key: str, ttl_seconds: int, value: str) -> None:
+            """Set *key* to *value* with an expiry of *ttl_seconds* seconds."""
+            client = await self._get()
+            await client.setex(key, ttl_seconds, value)
+
+        async def delete(self, *keys: str) -> int:
+            """Delete one or more keys."""
+            client = await self._get()
+            return await client.delete(*keys)
+
+        async def get_float(self, key: str, default: float = 0.0) -> float:
+            raw = await self.get(key)
+            if raw is None:
+                return default
+            try:
+                return float(raw)
+            except (ValueError, TypeError):
+                return default
+
+        async def pipeline(self):  # type: ignore[no-untyped-def]
+            """Return a raw redis.asyncio pipeline for WATCH/MULTI/EXEC."""
+            client = await self._get()
+            return client.pipeline()
+
+        async def watch(self, *keys: str):  # type: ignore[no-untyped-def]
+            """Return a pipeline in WATCH mode for optimistic locking."""
+            client = await self._get()
+            return client.pipeline()
+
+        async def get_raw_client(self) -> aioredis.Redis:
+            """Return the underlying aioredis.Redis client.
+
+            Use this only when the raw client is required for operations not
+            exposed by the wrapper (e.g. Lua EVALSHA in cbf.py).  Prefer the
+            wrapper methods (get, set, setex, pipeline) for all other uses.
+
+            CRIT-4 fix: replaces direct calls to the private _get() method from
+            cbf.py, which broke encapsulation and bypassed the wrapper contract.
+            """
+            return await self._get()
+
+        async def watched_transaction(
+            self,
+            watch_keys: list[str],
+            staging_keys: list[str],
+            build_pipeline_fn: Any,
+        ) -> Any:
+            """Execute a WATCH/MULTI/EXEC transaction with guaranteed cleanup on abort.
+
+            Contract:
+                1. WATCH is issued on *watch_keys* before any reads or staging writes.
+                2. The caller-supplied *build_pipeline_fn* is invoked with the pipeline
+                   object after WATCH but before MULTI.  It may write staging keys
+                   (SET/HSET/LPUSH/etc.) outside the pipeline queue — those keys must
+                   be listed in *staging_keys* so they can be cleaned up on abort.
+                3. MULTI is called, the pipeline commands are queued, and EXEC is
+                   issued atomically.
+                4. If a concurrent writer modifies any watched key between step 1 and
+                   step 3, Redis raises ``WatchError``.  This method catches it,
+                   deletes every key listed in *staging_keys* (best-effort), emits a
+                   structured WARNING log, and re-raises as ``TransactionAbortedError``.
+
+            Cleanup guarantee:
+                Any key in *staging_keys* that was written before MULTI is explicitly
+                deleted via ``DEL`` before ``TransactionAbortedError`` is raised.  This
+                prevents dirty staging state from leaking into subsequent reads.
+
+            Args:
+                watch_keys:        Keys to pass to WATCH.  The transaction aborts if
+                                   any of these are modified by another client before
+                                   EXEC.
+                staging_keys:      Keys written outside the pipeline (before MULTI)
+                                   that must be cleaned up on WatchError.
+                build_pipeline_fn: Async callable ``(pipe) -> None`` invoked after
+                                   WATCH.  It should issue any pre-MULTI writes and
+                                   then queue pipeline commands.  The pipeline is
+                                   already in buffered (MULTI) mode when EXEC is
+                                   called by this method.
+
+            Returns:
+                The list of results returned by ``pipe.execute()``.
+
+            Raises:
+                TransactionAbortedError: A watched key was modified concurrently.
+                                         All staging keys have been deleted.
+            """
+            client = await self._get()
+            async with client.pipeline(transaction=True) as pipe:
+                try:
+                    await pipe.watch(*watch_keys)
+                    pipe.multi()
+                    await build_pipeline_fn(pipe)
+                    return await pipe.execute()
+                except aioredis.WatchError:
+                    # Best-effort cleanup of any staging keys written before MULTI.
+                    if staging_keys:
+                        try:
+                            await client.delete(*staging_keys)
+                        except Exception as del_exc:
+                            logger.warning(
+                                "watched_transaction: staging key cleanup failed: %s",
+                                del_exc,
+                            )
+                    logger.warning(
+                        json.dumps(
+                            {
+                                "event": "redis_watch_abort",
+                                "keys_cleaned": staging_keys,
+                                "reason": "WatchError",
+                            }
+                        )
+                    )
+                    raise TransactionAbortedError(
+                        f"WATCH aborted: concurrent modification of {watch_keys}"
+                    ) from None
+
+        async def ping_ready(self) -> None:
+            """Verify Redis is reachable by issuing a PING command.
+
+            Call this at startup before marking the pod ready. Raises
+            RuntimeError if the ping fails or times out — preventing silent
+            failures on every CBF call when Redis is unreachable
+            (see PERFORMANCE_REVIEW.md §3).
+
+            Returns:
+                None on success.
+
+            Raises:
+                RuntimeError: If the PING command fails or raises any exception.
+            """
+            try:
+                client = await self._get()
+                result = await client.ping()  # type: ignore[misc]  # redis-py ping() returns bool | Awaitable[bool] depending on connection type
+                if not result:
+                    raise RuntimeError(
+                        f"Redis PING returned falsy response at "
+                        f"{_REDIS_HOST}:{_REDIS_PORT}"
+                    )
+            except RuntimeError:
+                raise
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Redis is not reachable at {_REDIS_HOST}:{_REDIS_PORT}: {exc}"
+                ) from exc
+
+        async def close(self) -> None:
+            if self._client is not None:
+                await self._client.aclose()
+                self._client = None
+
+    redis_client = _AsyncRedisClient()
+    logger.info(
+        "✅ Gateway Redis client initialised (%s:%s db=%s)",
+        _REDIS_HOST,
+        _REDIS_PORT,
+        _REDIS_DB,
+    )
+
+    class _SyncRedisClient:
+        """Thin synchronous Redis wrapper for use in thread-pool contexts.
+
+        This client uses the standard (blocking) ``redis.Redis`` driver so it
+        can be called safely from worker threads (e.g. functions dispatched via
+        ``asyncio.to_thread``).  It shares the same connection parameters as
+        the async ``_AsyncRedisClient`` above.
+        """
+
+        def __init__(self) -> None:
+            self._client: redis.Redis | None = None  # type: ignore[type-arg]
+
+        def _get(self) -> redis.Redis:  # type: ignore[type-arg]
+            if self._client is None:
+                from src.gateway.infrastructure.redis_credential_factory import (
+                    get_redis_credential_provider,
+                )
+
+                cred_provider = get_redis_credential_provider()
+                effective_password = (
+                    None if cred_provider is not None else _REDIS_PASSWORD
+                )
+                self._client = redis.Redis(
+                    host=_REDIS_HOST,
+                    port=_REDIS_PORT,
+                    db=_REDIS_DB,
+                    password=effective_password,
+                    credential_provider=cred_provider,
+                    decode_responses=True,
+                    socket_connect_timeout=3.0,
+                    socket_timeout=3.0,
+                    ssl=_REDIS_TLS,
+                    ssl_cert_reqs=_REDIS_SSL_CERT_REQS,  # type: ignore[arg-type]
+                    ssl_ca_certs=_REDIS_CA_CERT_PATH,
+                )
+            return self._client
+
+        def get(self, key: str) -> str | None:
+            return self._get().get(key)  # type: ignore[return-value]
+
+        def setex(self, key: str, ttl_seconds: int, value: str) -> None:
+            """Set *key* to *value* with an expiry of *ttl_seconds* seconds."""
+            self._get().setex(key, ttl_seconds, value)
+
+        def ping_ready(self) -> None:
+            """Verify Redis is reachable by issuing a synchronous PING command.
+
+            Designed for module-import-time startup probes (which run in a
+            synchronous context). Raises RuntimeError if the ping fails or
+            times out — preventing silent CBF failures when Redis is
+            unreachable (see PERFORMANCE_REVIEW.md §3).
+
+            Returns:
+                None on success.
+
+            Raises:
+                RuntimeError: If the PING command fails or raises any exception.
+            """
+            try:
+                result = self._get().ping()
+                if not result:
+                    raise RuntimeError(
+                        f"Redis PING returned falsy response at "
+                        f"{_REDIS_HOST}:{_REDIS_PORT}"
+                    )
+            except RuntimeError:
+                raise
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Redis is not reachable at {_REDIS_HOST}:{_REDIS_PORT}: {exc}"
+                ) from exc
+
+        def close(self) -> None:
+            if self._client is not None:
+                self._client.close()
+                self._client = None
+
+    sync_redis_client = _SyncRedisClient()
+    logger.info(
+        "✅ Gateway sync Redis client initialised (%s:%s db=%s)",
+        _REDIS_HOST,
+        _REDIS_PORT,
+        _REDIS_DB,
+    )
+
+except ImportError:
+    logger.warning(
+        "⚠️ redis.asyncio not installed — gateway Redis client unavailable. "
+        "Install with: pip install redis[asyncio]"
+    )
+    redis_client = None  # type: ignore[assignment]
+    sync_redis_client = None  # type: ignore[assignment]
+
+
+def get_redis_client() -> "_SyncRedisClient":  # type: ignore[name-defined]
+    """Return the module-level synchronous Redis client singleton.
+
+    Use this factory for startup readiness probes and any synchronous
+    context (e.g. ``governor.posture.assert_production_posture``).
+    The async ``redis_client`` singleton is preferred for all async paths.
+
+    Raises:
+        RuntimeError: If the redis package is not installed
+            (``sync_redis_client`` is None).
+    """
+    if sync_redis_client is None:
+        raise RuntimeError(
+            "Redis client is not available — redis package not installed. "
+            "Install with: pip install redis[asyncio]"
+        )
+    return sync_redis_client  # type: ignore[return-value]
+
+
+def build_async_redis(url: str, *, db: int, socket_timeout: float = 10.0) -> Any:
+    """Build a ``redis.asyncio.Redis`` for ``url`` with the deployment's TLS and auth.
+
+    ``redis.asyncio.from_url(url)`` alone ignores ``REDIS_TLS``,
+    ``REDIS_CA_CERT_PATH`` and the Memorystore IAM credential provider, so it
+    cannot reach a TLS- or IAM-protected instance. The evidence stream
+    producer (gateway) and custodian (compliance bridge) both connect through
+    here so they share one connection contract.
+
+    TLS is on when ``REDIS_TLS`` is truthy or the URL scheme is ``rediss://``.
+    Certificates are verified (``CERT_REQUIRED``) under every enforcing
+    posture; only dev/test/ci without a readable ``REDIS_CA_CERT_PATH`` skip
+    verification. When an IAM credential provider is configured, any URL
+    password is ignored.
+    """
+    from urllib.parse import unquote, urlparse
+
+    import redis.asyncio as aioredis_mod
+
+    from src.gateway.infrastructure.redis_credential_factory import (
+        get_redis_credential_provider,
+    )
+
+    parsed = urlparse(url)
+    if parsed.scheme not in ("redis", "rediss"):
+        raise ValueError(f"Unsupported Redis URL scheme: {parsed.scheme!r}")
+
+    use_tls = parsed.scheme == "rediss" or os.environ.get("REDIS_TLS", "").lower() in (
+        "true",
+        "1",
+        "yes",
+    )
+    cert_reqs, ca_certs = resolve_redis_tls(use_tls)
+
+    cred_provider = get_redis_credential_provider()
+    password = None
+    if cred_provider is None:
+        password = (
+            unquote(parsed.password)
+            if parsed.password
+            else os.environ.get("REDIS_PASSWORD") or None
+        )
+
+    return aioredis_mod.Redis(
+        host=parsed.hostname or "localhost",
+        port=parsed.port or 6379,
+        db=db,
+        password=password,
+        credential_provider=cred_provider,
+        decode_responses=True,
+        socket_connect_timeout=3.0,
+        socket_timeout=socket_timeout,
+        ssl=use_tls,
+        ssl_cert_reqs=cert_reqs,
+        ssl_ca_certs=ca_certs,
+    )

@@ -1,0 +1,14 @@
+{
+  "additional_file": "src/gateway/governance/warrant/authority.py",
+  "license": "Apache-2.0",
+  "modified_files_reported_by_independent_audit": [
+    "src/gateway/governance/governor/stages/warrant.py",
+    "src/gateway/governance/warrant/cache.py",
+    "src/gateway/governance/warrant/verifier.py",
+    "src/gateway/server/workload_identity.py",
+    "src/integrations/provider_05/warrant_source.py"
+  ],
+  "relationship": "LEGION uses and modifies CAGE; not an official Google product",
+  "upstream": "https://github.com/google/cybernetic-agent-governance-engine",
+  "upstream_pin": "73510b832422cd0b8a9b534edfc09df58f8f4b66"
+}

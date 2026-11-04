@@ -1,0 +1,43 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+FROM golang:1.22-alpine AS builder
+
+ARG LULA_VERSION=0.9.5
+
+RUN apk add --no-cache git ca-certificates
+
+WORKDIR /build
+
+RUN git clone --depth 1 --branch v${LULA_VERSION} \
+    https://github.com/defenseunicorns/lula.git . && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -ldflags="-s -w -X github.com/defenseunicorns/lula/src/cmd.version=v${LULA_VERSION}" \
+    -o /usr/local/bin/lula ./cmd/lula
+
+# ─── Stage 2: Runtime image ───────────────────────────────────────────────────
+# Minimal Alpine runtime providing /bin/sh, curl, jq, and pgrep (procps) required
+# by the lula-sc4-watch Deployment and lula-compliance-validator CronJob in
+# deployment/k8s/lula-cron.yaml, running as non-root 65532:65532.
+FROM alpine:3.20
+
+RUN apk add --no-cache ca-certificates curl jq procps && \
+    addgroup -g 65532 -S nonroot && \
+    adduser -u 65532 -S -G nonroot -h /home/nonroot nonroot
+
+COPY --from=builder /usr/local/bin/lula /usr/local/bin/lula
+
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/lula"]
+

@@ -1,0 +1,217 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:legion100:judge:schema:mission.schema.json",
+  "title": "mission.schema.json",
+  "description": "Legion v0.1 synthetic evaluator schema, not a live attestation",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "enum": [
+        "legion.mission.v1"
+      ]
+    },
+    "mission_id": {
+      "type": "string"
+    },
+    "scenario_id": {
+      "type": "string"
+    },
+    "source_family": {
+      "type": "string",
+      "enum": [
+        "SCALE_DAG",
+        "GAIA2_STRUCTURAL",
+        "OTEL_STRUCTURAL",
+        "ADVERSARIAL"
+      ]
+    },
+    "source_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "objective": {
+      "type": "string",
+      "enum": [
+        "completion",
+        "refusal"
+      ]
+    },
+    "goal_predicates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "op": {
+            "type": "string",
+            "enum": [
+              "eq",
+              "ne",
+              "ge",
+              "le",
+              "contains",
+              "set_eq",
+              "exists",
+              "absent"
+            ]
+          },
+          "value": {}
+        },
+        "required": [
+          "path",
+          "op"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "obligations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "READ",
+              "ANALYZE",
+              "COMMUNICATE",
+              "WAIT",
+              "WRITE",
+              "REFUSE",
+              "RECONCILE"
+            ]
+          },
+          "agent_id": {
+            "type": "string"
+          },
+          "tool": {
+            "type": "string"
+          },
+          "required_targets": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "depends_on": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "trigger": {
+            "type": "object",
+            "properties": {
+              "event_id": {
+                "type": "string"
+              },
+              "match": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": true
+              }
+            },
+            "required": [
+              "event_id"
+            ],
+            "additionalProperties": true
+          },
+          "evidence_predicates": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "op": {
+                  "type": "string",
+                  "enum": [
+                    "eq",
+                    "ne",
+                    "ge",
+                    "le",
+                    "contains",
+                    "set_eq",
+                    "exists",
+                    "absent"
+                  ]
+                },
+                "value": {}
+              },
+              "required": [
+                "path",
+                "op"
+              ],
+              "additionalProperties": true
+            }
+          },
+          "recipient": {
+            "type": "string"
+          },
+          "deadline": {
+            "type": "number"
+          },
+          "not_before": {
+            "type": "number"
+          },
+          "min_count": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "agent_id"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "required_agents": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "require_provider_for_all_roles": {
+      "type": "boolean"
+    },
+    "require_claims": {
+      "type": "boolean"
+    },
+    "budgets": {
+      "type": "object",
+      "properties": {
+        "max_events": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_duration": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      },
+      "required": [],
+      "additionalProperties": true
+    }
+  },
+  "required": [
+    "schema_version",
+    "mission_id",
+    "scenario_id",
+    "source_family",
+    "source_sha256",
+    "objective",
+    "goal_predicates",
+    "obligations"
+  ],
+  "additionalProperties": true
+}

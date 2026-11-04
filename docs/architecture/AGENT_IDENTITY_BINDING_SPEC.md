@@ -1,0 +1,611 @@
+# AGENT_IDENTITY_BINDING_SPEC.md
+
+**Version:** 1.1.0  
+**Status:** CANONICAL — IMPLEMENTED  
+**Last Updated:** 2026-09-29  
+**Applies To:** CAGE Gateway v3.1.0+
+
+---
+
+## Executive Summary
+
+This specification defines the cryptographic binding mechanism between agent identities and governance decisions in the Cybernetic Agentic Governance Engine (CAGE). It establishes the mesh workload identity verified from mTLS transport-layer certificates as the canonical source of truth for agent authentication, eliminating reliance on spoofable HTTP headers and request bodies. At HEAD that identity is Linkerd's DNS-style client identity (`l5d-client-id`, issued under a Google CAS trust anchor), not a `spiffe://` URI; the `spiffe://` examples in §3–§4 describe the target naming convention for catalog and delegation policy.
+
+The gateway's ingress authentication is this workload identity alone. The former HMAC routing-seal ingress check (`X-CAGE-Routing-Seal`, `CAGE_ROUTING_SEAL_SECRET`) is removed; the routing seal remains only an internal artifact of `/tools/execute` and `ConsequenceGateway`. The only workload admitted to gated gateway routes is the advisor (`cage-advisor-sa`), which itself holds no signing key or Google Cloud identity.
+
+**Core Principle:** *"Secure the consequence, not the identity."* Authentication happens at the transport layer; authorization happens at the governance gate.
+
+---
+
+## §1 Architectural Role & Security Boundaries
+
+### 1.1 Threat Model & Anti-Patterns
+
+**Vulnerability:** Relying on unauthenticated HTTP request metadata (`X-Agent-ID`, `X-SPIFFE-ID` headers, or JSON body fields) for identity assertion creates a trivial spoofing attack surface. Any client capable of crafting HTTP requests can forge identity claims.
+
+**Deprecated Patterns:**
+```python
+# ❌ FORBIDDEN: Header-based identity extraction
+agent_id = request.headers.get("X-Agent-ID")  # Spoofable
+spiffe_id = request.headers.get("X-SPIFFE-ID")  # Unauthenticated
+
+# ❌ FORBIDDEN: Body-based identity assertion
+agent_id = request.json.get("agent_id")  # Client-controlled
+```
+
+**Canonical Pattern:**
+```python
+# ✅ REQUIRED: Extract Linkerd mTLS workload identity from the inbound proxy
+from src.gateway.server.workload_identity import extract_client_identity
+
+# Linkerd's inbound proxy terminates TLS, verifies the peer certificate against
+# the Google CAS trust anchor, and overwrites l5d-client-id (or strips it when
+# no valid client certificate was presented).
+agent_id = extract_client_identity(request.scope)
+```
+
+### 1.2 Layer 1 Integration Point
+
+Under Linkerd mTLS, the Linkerd inbound proxy terminates TLS in front of the gateway container and sets `l5d-client-id` (`<sa>.<ns>.serviceaccount.identity.linkerd.<trust-domain>`) — or strips the header if no verified peer certificate was presented. Gateway ingress authentication and caller identity extraction live in [`src/gateway/server/workload_identity.py`](../../src/gateway/server/workload_identity.py), invoked at every ingress edge upstream of all governance decision logic:
+
+| Symbol | Role | Failure Mode |
+|---|---|---|
+| `WorkloadIdentityMiddleware` | Outermost ASGI middleware enforcing `CAGE_TRUSTED_CLIENT_IDENTITIES` in every environment | HTTP **403** / WebSocket **1008** |
+| `extract_client_identity(scope)` | Extracts the single verified `l5d-client-id` from the ASGI scope | `WorkloadIdentityError` |
+| `load_identity_policy()` | Loads `CAGE_TRUSTED_CLIENT_IDENTITIES` (always required in every environment) | `RuntimeError` |
+
+Identities are validated against `_LINKERD_IDENTITY` (`<sa>.<ns>.serviceaccount.identity.linkerd.<trust-domain>`) before any downstream consumption.
+
+**Call sites (fail closed):**
+
+```python
+# src/gateway/server/inference_proxy.py — HTTP ingress
+from src.gateway.server.workload_identity import (
+    WorkloadIdentityError,
+    extract_client_identity,
+)
+
+try:
+    agent_id = extract_client_identity(request.scope)
+except WorkloadIdentityError as identity_exc:
+    # No verified Linkerd workload identity → 401, no anonymous fallback.
+    return JSONResponse(
+        content={
+            "error": "authentication_required",
+            "message": str(identity_exc),
+        },
+        status_code=401,
+    )
+```
+
+`WorkloadIdentityMiddleware` is installed on the gateway root app in [`hybrid_server.py`](../../src/gateway/server/hybrid_server.py). It is the application half of a two-layer control; the mesh half is the Linkerd `Server` / `HTTPRoute` / `MeshTLSAuthentication` / `AuthorizationPolicy` set in [`deployment/k8s/linkerd-mtls-policy.yaml`](../../deployment/k8s/linkerd-mtls-policy.yaml) (Terraform: [`infra/modules/gateway/mesh-policy/`](../../infra/modules/gateway/mesh-policy)), which admits only the advisor identity to gated routes. The Linkerd control plane and CAS trust anchor are provisioned by [`infra/modules/service_mesh/`](../../infra/modules/service_mesh).
+
+**Security Boundary:**
+- **Trust Anchor:** Linkerd inbound mTLS termination proxy validates certificate chains against the mesh trust anchor (Google CAS) before forwarding to the gateway and setting `l5d-client-id`.
+- **Zero Trust Assumption:** CAGE Layer 1 code MUST NOT accept identity claims from client-controlled application-layer headers or bodies. `CAGE_TRUSTED_CLIENT_IDENTITIES` is required in every environment and the gateway always enforces workload identity.
+
+---
+
+## §2 Double-Binding Mechanism (mTLS + DPoP)
+
+### 2.1 Rationale: Defense Against Token Exfiltration
+
+Even with mTLS authentication, bearer tokens (JWT access tokens, API keys) can be exfiltrated via compromised logs, stolen memory dumps, or server-side request forgery (SSRF). **Demonstrating Proof-of-Possession (DPoP)** cryptographically binds tokens to the specific TLS client certificate, rendering stolen tokens unusable without the corresponding private key.
+
+### 2.2 DPoP Token Structure (RFC 9449)
+
+A DPoP proof is a signed JWT containing:
+- `jkt` (JSON Key Thumbprint): SHA-256 hash of the TLS client certificate's public key
+- `htm` (HTTP Method): The method of the request (`POST`, `GET`, etc.)
+- `htu` (HTTP URI): The target endpoint URI
+- `iat` (Issued At): Timestamp (prevents replay)
+- `nonce` (optional): Server-provided challenge for freshness
+
+**Example DPoP JWT Header & Payload:**
+```json
+// Header
+{
+  "alg": "ES256",
+  "typ": "dpop+jwt",
+  "jwk": {
+    "kty": "EC",
+    "crv": "P-256",
+    "x": "...",
+    "y": "..."
+  }
+}
+
+// Payload
+{
+  "jti": "550e8400-e29b-41d4-a716-446655440000",
+  "htm": "POST",
+  "htu": "https://gateway.cage.altostrat.com/v1/evaluate",
+  "iat": 1726939200,
+  "jkt": "fZI9TRd8LNX7p6M3yD0WYvgKa2klGvNM8xJ1NqQw8Zs"  // SHA-256 hash of TLS cert pubkey
+}
+```
+
+### 2.3 Pure Python Implementation (No Proprietary SDKs)
+
+```python
+import hashlib
+import json
+import time
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509 import load_der_x509_certificate
+from cryptography.hazmat.backends import default_backend
+import jwt  # PyJWT library
+
+
+def compute_certificate_thumbprint(cert_der: bytes) -> str:
+    """
+    Compute SHA-256 thumbprint (jkt) of the certificate's public key.
+
+    Returns:
+        Base64url-encoded SHA-256 hash of the DER-encoded public key
+    """
+    cert = load_der_x509_certificate(cert_der, default_backend())
+    public_key_der = cert.public_key().public_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+
+    digest = hashlib.sha256(public_key_der).digest()
+    # Base64url encoding (RFC 4648 §5)
+    return jwt.utils.base64url_encode(digest).decode("utf-8")
+
+
+def create_dpop_proof(
+    signing_key: ec.EllipticCurvePrivateKey,
+    http_method: str,
+    http_uri: str,
+    tls_cert_der: bytes,
+    nonce: str | None = None,
+) -> str:
+    """
+    Generate a DPoP proof JWT bound to the TLS client certificate.
+
+    Args:
+        signing_key: EC private key corresponding to the TLS certificate
+        http_method: HTTP method (e.g., "POST")
+        http_uri: Target URI (e.g., "https://gateway.cage.altostrat.com/v1/evaluate")
+        tls_cert_der: DER-encoded TLS client certificate
+        nonce: Optional server-provided nonce
+
+    Returns:
+        Signed DPoP JWT string
+    """
+    jkt = compute_certificate_thumbprint(tls_cert_der)
+
+    # Extract public key for JWK representation
+    public_key = signing_key.public_key()
+    public_numbers = public_key.public_numbers()
+
+    # Convert coordinates to base64url
+    x_bytes = public_numbers.x.to_bytes(32, byteorder="big")
+    y_bytes = public_numbers.y.to_bytes(32, byteorder="big")
+
+    jwk = {
+        "kty": "EC",
+        "crv": "P-256",
+        "x": jwt.utils.base64url_encode(x_bytes).decode("utf-8"),
+        "y": jwt.utils.base64url_encode(y_bytes).decode("utf-8"),
+    }
+
+    headers = {"alg": "ES256", "typ": "dpop+jwt", "jwk": jwk}
+
+    payload = {
+        "jti": str(uuid.uuid4()),
+        "htm": http_method,
+        "htu": http_uri,
+        "iat": int(time.time()),
+        "jkt": jkt,
+    }
+
+    if nonce:
+        payload["nonce"] = nonce
+
+    return jwt.encode(payload, signing_key, algorithm="ES256", headers=headers)
+
+
+def verify_dpop_binding(
+    dpop_jwt: str, tls_cert_der: bytes, http_method: str, http_uri: str
+) -> bool:
+    """
+    Verify that the DPoP proof is bound to the presented TLS certificate.
+
+    Args:
+        dpop_jwt: DPoP proof JWT from the 'DPoP' HTTP header
+        tls_cert_der: DER-encoded TLS peer certificate from the connection
+        http_method: Expected HTTP method
+        http_uri: Expected HTTP URI
+
+    Returns:
+        True if binding is valid
+
+    Raises:
+        ValueError: If binding verification fails
+    """
+    # Decode without verification to extract JWK
+    unverified_header = jwt.get_unverified_header(dpop_jwt)
+    jwk = unverified_header.get("jwk")
+
+    if not jwk:
+        raise ValueError("DPoP JWT missing 'jwk' header")
+
+    # Reconstruct public key from JWK
+    x = int.from_bytes(jwt.utils.base64url_decode(jwk["x"]), byteorder="big")
+    y = int.from_bytes(jwt.utils.base64url_decode(jwk["y"]), byteorder="big")
+
+    public_numbers = ec.EllipticCurvePublicNumbers(x, y, ec.SECP256R1())
+    public_key = public_numbers.public_key(default_backend())
+
+    # Verify JWT signature
+    payload = jwt.decode(dpop_jwt, public_key, algorithms=["ES256"])
+
+    # Verify thumbprint binding
+    expected_jkt = compute_certificate_thumbprint(tls_cert_der)
+    if payload.get("jkt") != expected_jkt:
+        raise ValueError(
+            f"DPoP thumbprint mismatch: expected {expected_jkt}, got {payload.get('jkt')}"
+        )
+
+    # Verify HTTP method/URI binding
+    if payload.get("htm") != http_method:
+        raise ValueError(
+            f"DPoP method mismatch: expected {http_method}, got {payload.get('htm')}"
+        )
+
+    if payload.get("htu") != http_uri:
+        raise ValueError(
+            f"DPoP URI mismatch: expected {http_uri}, got {payload.get('htu')}"
+        )
+
+    # Verify freshness (allow 60 second clock skew)
+    iat = payload.get("iat")
+    if not iat or abs(time.time() - iat) > 60:
+        raise ValueError("DPoP proof expired or clock skew exceeds tolerance")
+
+    return True
+```
+
+### 2.4 Gateway Integration
+
+The DPoP proof is presented in the `DPoP` HTTP header:
+
+```http
+POST /v1/evaluate HTTP/1.1
+Host: gateway.cage.altostrat.com
+DPoP: eyJhbGciOiJFUzI1NiIsInR5cCI6ImRwb3Arand0IiwiandrIjp7Imt0eSI6...
+Content-Type: application/json
+```
+
+Gateway middleware validates the binding before routing to governance logic:
+
+```python
+async def dpop_validation_middleware(request: Request, call_next):
+    dpop_header = request.headers.get("DPoP")
+
+    if not dpop_header:
+        raise Unauthorized("DPoP proof required")
+
+    tls_cert_der = request.state.tls_peer_cert
+
+    try:
+        verify_dpop_binding(
+            dpop_jwt=dpop_header,
+            tls_cert_der=tls_cert_der,
+            http_method=request.method,
+            http_uri=str(request.url),
+        )
+    except ValueError as e:
+        raise Forbidden(f"DPoP validation failed: {e}")
+
+    return await call_next(request)
+```
+
+---
+
+## §3 Handling Ephemerality & Prefix Matching
+
+### 3.1 Problem Statement: Static UUIDs vs. Ephemeral Workloads
+
+In Kubernetes/serverless environments, agent pods are continuously recreated with new SPIFFE IDs:
+```
+spiffe://cage.altostrat.com/agents/finance/trading-bot-abc123  # Pod 1 (terminated)
+spiffe://cage.altostrat.com/agents/finance/trading-bot-xyz789  # Pod 2 (replacement)
+```
+
+Writing policies against exact UUIDs causes `POLICY_DRIFT_VIOLATION` errors whenever pods restart. The namespace prefix (`/agents/finance/`) represents the **logical agent role**, while the suffix represents the ephemeral instance.
+
+### 3.2 OPA Rego Input Contract
+
+> [!NOTE]
+> Target state. At HEAD the gateway does not build this input: the verified identity is a Linkerd name, the governor records the caller as `_caller_principal`, and [`config/opa/agent_catalog.rego`](../../config/opa/agent_catalog.rego) keys on `input.caller_identity.sub` (populated by the optional OIDC middleware in [`governance_middleware.py`](../../src/gateway/server/governance_middleware.py)). The contract below is the intended shape once SPIFFE-style names reach OPA.
+
+The target OPA policy evaluation input is:
+
+```json
+{
+  "input": {
+    "agent_id": "spiffe://cage.altostrat.com/agents/finance/trading-bot-xyz789",
+    "agent_namespace": "finance",
+    "action": "ftra.market.place_order",
+    "consequence": {
+      "target_entity": "spiffe://nasdaq.external.com/trading/equities",
+      "amount": 1000000,
+      "asset": "AAPL"
+    },
+    "timestamp": "2026-09-22T17:33:35.411Z"
+  }
+}
+```
+
+### 3.3 Namespace Wildcard Matching in OPA Rego
+
+Policies evaluate against the **namespace prefix** rather than the full SPIFFE ID:
+
+```rego
+package cage.finance.ftra
+
+import future.keywords.if
+import future.keywords.in
+
+# Extract namespace from SPIFFE ID
+agent_namespace := ns if {
+    parts := split(input.agent_id, "/")
+    # spiffe://cage.altostrat.com/agents/<namespace>/<instance-id>
+    #   [0]      [1]                 [2]     [3]        [4]
+    count(parts) >= 5
+    parts[2] == "agents"
+    ns := parts[3]
+}
+
+# Allow trading actions for any agent in the 'finance' namespace
+allow if {
+    agent_namespace == "finance"
+    startswith(input.action, "ftra.market.")
+    input.consequence.amount <= 10000000  # $10M limit
+}
+
+# Deny if outside authorized namespace
+deny[msg] if {
+    not agent_namespace == "finance"
+    startswith(input.action, "ftra.market.")
+    msg := sprintf("SPIFFE namespace '%s' not authorized for FTRA actions", [agent_namespace])
+}
+```
+
+### 3.4 Preventing POLICY_DRIFT_VIOLATION
+
+[`ControlRegistry`](../../src/gateway/governance/constants.py) exposes `active_hash`, a deterministic hash of the active regional compliance profile. [`scripts/check_policy_drift.py`](../../scripts/check_policy_drift.py) compares the compiled OPA artifact hash against that value and against the committed baseline in `config/opa/.policy_hash`. Ephemeral instance IDs must **not** appear in policy bodies, or every pod restart registers as drift:
+
+```python
+# ❌ DRIFT-INDUCING: Exact SPIFFE ID in policy
+allow if {
+    input.agent_id == "spiffe://cage.altostrat.com/agents/finance/trading-bot-abc123"
+}
+
+# ✅ DRIFT-RESISTANT: Namespace prefix matching
+allow if {
+    startswith(input.agent_id, "spiffe://cage.altostrat.com/agents/finance/")
+}
+```
+
+**Namespace Schema Convention:**
+```
+spiffe://<trust-domain>/agents/<domain>/<role>-<ephemeral-suffix>
+
+Examples:
+  spiffe://cage.altostrat.com/agents/finance/advisor-7f3a9b2c
+  spiffe://cage.altostrat.com/agents/healthcare/hipaa-auditor-1a4c8d3e
+  spiffe://cage.altostrat.com/agents/security/penetration-tester-9e2b5f1a
+```
+
+### 3.5 Agent Registration with Namespace Prefixes
+
+Agents are **not** registered through a Python API. `ControlRegistry` is a read-only singleton that loads `config/compliance/{REGION}_BASELINE.json`; it has no mutating methods. Registration is declarative and lands through PR + CI:
+
+1. Add the agent to `config/agent_catalog.json`, declaring `authorized_parent_prefixes` as SPIFFE **prefixes**, never exact IDs.
+2. [`config/opa/agent_catalog.rego`](../../config/opa/agent_catalog.rego) loads that file as an OPA data document (`approved_agents := data.agent_catalog_data.agents`) at startup and on bundle update.
+3. Prefix authorization is evaluated by `_parent_authorized_for_subagent`, which iterates the declared prefixes and applies `startswith(parent_spiffe, prefix)`.
+
+```rego
+# config/opa/agent_catalog.rego — shipped rule
+_parent_authorized_for_subagent(parent_spiffe, subagent) {
+    authorized_prefixes := object.get(subagent, "authorized_parent_prefixes", [])
+    some prefix in authorized_prefixes
+    startswith(parent_spiffe, prefix)
+}
+```
+
+Because matching is prefix-based, ephemeral instance suffixes never enter the policy body, and the catalog stays stable across pod restarts.
+
+---
+
+## §4 Declarative Agent-to-Agent (A2A) Authorization
+
+### 4.1 Use Case: Parent Agents Delegating to Subagents
+
+Multi-agent workflows require parent agents to spawn subagents for specialized tasks (e.g., a financial advisor delegating market analysis to a quantitative research subagent). The parent's SPIFFE ID establishes the **trust anchor** for the delegation.
+
+### 4.2 Delegation Schema
+
+Subagent SPIFFE IDs encode the parent relationship:
+```
+spiffe://cage.altostrat.com/agents/<domain>/<parent-role>/<subagent-role>-<suffix>
+
+Example:
+  Parent:   spiffe://cage.altostrat.com/agents/finance/advisor-7f3a9b2c
+  Subagent: spiffe://cage.altostrat.com/agents/finance/advisor-7f3a9b2c/quant-researcher-4d2e1a9b
+```
+
+### 4.3 OPA Policy for A2A Authorization
+
+```rego
+package cage.finance.delegation
+
+import future.keywords.if
+
+# Extract parent SPIFFE ID from subagent ID
+parent_spiffe_id(subagent_id) := parent if {
+    parts := split(subagent_id, "/")
+    count(parts) >= 6
+    # Reconstruct parent: spiffe://<domain>/agents/<namespace>/<parent>
+    parent := concat("/", array.slice(parts, 0, 5))
+}
+
+# Allow subagent action if parent is authorized
+allow if {
+    parent_id := parent_spiffe_id(input.agent_id)
+    
+    # Verify parent exists in authorized set
+    parent_id in data.authorized_parents
+    
+    # Verify action is within delegated scope
+    input.action in data.delegated_actions[parent_id]
+}
+
+# Deny direct subagent invocation without parent context
+deny[msg] if {
+    contains(input.agent_id, "/agents/finance/advisor-")
+    contains(input.agent_id, "/quant-researcher-")
+    not parent_spiffe_id(input.agent_id)
+    msg := "Subagent invoked without parent authorization context"
+}
+```
+
+### 4.4 Runtime Delegation Assertion
+
+Parent agents inject delegation metadata into subagent invocations. This is a proposed API (Phase 4, not started): `GovernanceEnvelopeBuilder.build()` is an async instance method and has no `delegation` parameter at HEAD.
+
+```python
+from src.gateway.governance.governance_envelope import GovernanceEnvelopeBuilder
+
+# Parent agent initiates subagent call (proposed signature)
+envelope = await builder.build(
+    agent_id=request.state.verified_spiffe_id,  # Parent's SPIFFE ID
+    action="ftra.market.analyze_volatility",
+    consequence={"target_market": "NASDAQ", "timeframe": "30d"},
+    delegation={
+        "subagent_spiffe": "spiffe://cage.altostrat.com/agents/finance/advisor-7f3a9b2c/quant-researcher-4d2e1a9b",
+        "delegated_actions": [
+            "ftra.analytics.fetch_timeseries",
+            "ftra.analytics.compute_volatility",
+        ],
+        "ttl_seconds": 300,
+    },
+)
+```
+
+The gateway validates that:
+1. The **caller's TLS certificate** matches the parent SPIFFE ID.
+2. The subagent SPIFFE ID is properly prefixed with the parent's path.
+3. The requested action is within the `delegated_actions` allowlist.
+4. The delegation has not exceeded its TTL.
+
+### 4.5 Preventing Privilege Escalation
+
+**Invariant:** Subagents MUST NOT have broader privileges than their parent.
+
+```rego
+# Subagent action scope must be a subset of parent scope
+deny[msg] if {
+    parent_id := parent_spiffe_id(input.agent_id)
+    parent_tier := data.agent_tiers[parent_id]
+    subagent_tier := data.agent_tiers[input.agent_id]
+    
+    # Numeric tier comparison (Tier 1 > Tier 2 > Tier 3 > Tier 4)
+    subagent_tier < parent_tier
+    
+    msg := sprintf("Subagent tier %d exceeds parent tier %d", [subagent_tier, parent_tier])
+}
+```
+
+---
+
+## §5 Implementation Status
+
+Header-based identity was first removed in `feat(gateway)!: replace X-Agent-ID header with native SPIFFE extraction`. The SPIFFE extractor (`spiffe_extractor.py`) and the HMAC routing-seal ingress check were later replaced by Linkerd mTLS workload identity (`fix(security)!: replace gateway ingress HMAC check with Linkerd mTLS workload identity`, POAM-2026-080).
+
+### Phase 1 — Transport-Layer Identity Extraction ✅ SHIPPED
+- [x] [`src/gateway/server/workload_identity.py`](../../src/gateway/server/workload_identity.py) (`WorkloadIdentityMiddleware` and `extract_client_identity(scope)`) enforces `CAGE_TRUSTED_CLIENT_IDENTITIES` in every environment and extracts verified Linkerd `l5d-client-id` identities from the ASGI scope
+- [x] All `X-Agent-ID` / `X-SPIFFE-ID` header parsing and anonymous fallback removed from [`inference_proxy.py`](../../src/gateway/server/inference_proxy.py)
+- [x] Fail-closed coverage: `test_missing_spiffe_certificate_fails_closed` and `test_agent_id_from_spiffe_cert_used_for_quota` in [`tests/test_inference_proxy_extended.py`](../../tests/test_inference_proxy_extended.py)
+
+### Phase 2 — DPoP Double-Binding ⚠️ PARTIAL
+- [x] Vendor-neutral `ProofOfPossessionValidator` protocol and `DPoPValidator` in [`src/gateway/server/dpop_validator.py`](../../src/gateway/server/dpop_validator.py) (11 tests in [`tests/test_dpop_validator.py`](../../tests/test_dpop_validator.py))
+- [ ] **Wire the validator into an ingress path.** The module currently has no importers in `src/` — DPoP is implemented and unit-tested, but no request is validated against it yet.
+- [ ] DPoP examples in agent SDK documentation ([`packages/cage-client/`](../../packages/cage-client))
+- [ ] Kubernetes pod manifests mounting agent signing keys
+- [ ] Load tests verifying DPoP overhead < 5ms p99
+
+### Phase 3 — Namespace Prefix Policies ✅ SHIPPED
+- [x] [`config/opa/agent_catalog.rego`](../../config/opa/agent_catalog.rego) evaluates `authorized_parent_prefixes` via `startswith()`
+- [x] Catalog entries declared declaratively in `config/agent_catalog.json`
+- [ ] Verify `POLICY_DRIFT_VIOLATION` no longer triggers on pod restarts under sustained staging load
+
+### Phase 4 — A2A Delegation Framework 🔲 NOT STARTED
+- [ ] Subagent SPIFFE ID generation in the agent runtime
+- [ ] Delegation metadata in [`GovernanceEnvelopeBuilder`](../../src/gateway/governance/governance_envelope.py) — the envelope builder does not yet consume the verified SVID
+- [ ] OPA delegation policy library under `config/opa/delegation/`
+- [ ] E2E tests for parent → subagent → external service call chains
+
+---
+
+## §6 Security Considerations
+
+### 6.1 Trust Bundle Management
+- **Rotation Frequency:** SPIFFE trust bundles MUST rotate at least every 90 days.
+- **Distribution:** Use SPIFFE Federation API or Kubernetes ConfigMaps with `immutable: true`.
+- **Revocation:** Implement Certificate Revocation List (CRL) checks before accepting certificates.
+
+### 6.2 Replay Attack Mitigation
+- DPoP `iat` timestamps MUST be validated with ≤60 second tolerance.
+- Optional: Implement server-side nonce challenges for high-value transactions (Tier 1/2 actions).
+
+### 6.3 Key Material Storage
+- Agent signing keys (for DPoP) MUST reside in Kubernetes Secrets with `type: kubernetes.io/tls`.
+- Production environments SHOULD use hardware security modules (HSMs) or Google Cloud KMS for key storage.
+
+### 6.4 Monitoring & Alerting
+- Alert on any `DPoP validation failed` errors (potential attack indicator).
+- Log all SPIFFE ID extractions with certificate thumbprints for forensic auditability.
+- Alert on SPIFFE namespace policy denials (potential misconfiguration or privilege escalation attempt).
+
+---
+
+## §7 Compliance Mappings
+
+| Control Family | Mapped Controls | Implementation Reference |
+|---|---|---|
+| **NIST SP 800-53 Rev. 5** | IA-3 (Device Identification), IA-4 (Identifier Management), IA-5 (Authenticator Management), SC-8 (Transmission Confidentiality) | mTLS certificate extraction, DPoP binding |
+| **ISO 27001:2022** | A.9.2.1 (User Registration), A.9.4.3 (Password Management System) | SPIFFE SVID as cryptographic authenticator |
+| **PCI DSS v4.0** | Req 8.3.1 (Multi-Factor Authentication), Req 8.3.11 (MFA for Remote Access) | DPoP proof-of-possession as second factor |
+| **GDPR Article 32** | Security of Processing (cryptographic protection) | End-to-end mTLS with certificate-bound tokens |
+
+---
+
+## §8 References
+
+- **RFC 9449:** OAuth 2.0 Demonstrating Proof of Possession (DPoP)
+- **SPIFFE Specification:** https://github.com/spiffe/spiffe/blob/main/standards/SPIFFE.md
+- **CAGE Architecture Decision Records:**
+  - ADR-008: Fail-Closed Execution Boundary
+  - ADR-015: Sovereign Telemetry with Langfuse (vs. LangSmith prohibition)
+  - ADR-022: Three-Layer Architecture (Kernel, Domain Plugins, Rails)
+- **NIST SP 800-204C:** DevSecOps for Microservices (Zero Trust mTLS guidance)
+
+---
+
+## §9 Changelog
+
+| Version | Date | Author | Changes |
+|---|---|---|---|
+| 1.0.0 | 2026-09-22 | Principal Security & Governance Architect | Initial specification: SPIFFE extraction, DPoP binding, namespace prefix matching, A2A delegation |
+| 1.1.0 | 2026-09-22 | Documentation sync | Re-grounded against shipped code: corrected module paths (`server/workload_identity.py`, `server/dpop_validator.py`, `governance/constants.py`), replaced the non-existent `ControlRegistry.register_control()` API with the `config/agent_catalog.json` + `agent_catalog.rego` mechanism, converted §5 roadmap to verified implementation status |
+
+---
+
+**End of Specification**

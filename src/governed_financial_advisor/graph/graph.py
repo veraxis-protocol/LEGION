@@ -1,0 +1,355 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""
+Graph Definition: CAGE Architecture — Phase 3 (Explicit Lifecycle)
+Planner -> Evaluator -> [FTRA + Safety Gate] -> Executor -> Auditor
+
+The advisor is an untrusted client of the gateway: it hosts no
+``SymbolicGovernor`` and holds no signing identity (POAM-2026-079).
+
+Graph Topology
+--------------
+The governed financial advisor graph is a directed state machine with the
+following node sequence:
+
+    START
+      └─► nemo_guardrail        (mandatory input rail — ADR 2026-03-09)
+            ├─► END             (blocked path — no agent output to screen)
+            └─► thinker_node
+                  └─► doer_node
+                        ├─► data_analyst      ─► nemo_output_rail ─► END
+                        ├─► execution_analyst ─► evaluator
+                        │     ├─► ftra_node   (CTRL_FTRA_001 — Tier 0.5 reachability gate)
+                        │     │     ├─► safety_check ─► governed_trader ─► explainer
+                        │     │     │                └─► explainer (BLOCKED/ESCALATED)
+                        │     │     ├─► explainer (FTRA BLOCKED)
+                        │     │     └─► [DeferQueue park] (FTRA HITL_REQUIRED)
+                        │     └─► execution_analyst (loop, max 3)
+                        │     └─► explainer (loop cap)
+                        └─► nemo_output_rail (FINISH) ─► END
+
+Side-Effect Surface
+-------------------
+All nodes that perform external I/O (database writes, API calls, message
+queue publishes) are annotated with ``@side_effect_node`` from
+:mod:`src.governed_financial_advisor.graph.annotations`.
+
+To inspect the complete side-effect surface without running the system,
+call :func:`get_side_effect_topology`.  This is the canonical proof
+artifact for the July compliance review.
+
+LangGraph 1.1 Notes:
+  - StateGraph / TypedDict / add_messages API is fully backward-compatible.
+  - Consumers may opt in to typed streaming via ``version="v2"`` on
+    ``invoke()`` / ``stream()`` calls (see LangGraph 1.1 migration guide).
+  - HITL suspension uses the dynamic ``interrupt()`` primitive inside
+    ``approval_node``; the static ``interrupt_before`` parameter was removed in
+    Phase 2.1 (see ``_build_workflow`` and the compile sites below).  Callers
+    resume with ``Command(resume={...})`` via the LangGraph SDK.
+"""
+
+import os
+
+from langgraph.graph import END, StateGraph
+
+from src.gateway.governance.ftra.node_factory import create_ftra_node, route_after_ftra
+
+from .annotations import SIDE_EFFECT_REGISTRY
+from .checkpointer import get_checkpointer
+from .nodes.agent_nodes import (
+    create_governed_trader_node,
+    data_analyst_node,
+    execution_analyst_node,
+)
+from .nodes.approval_node import approval_node, create_approval_node
+from .nodes.defer_node import defer_node
+from .nodes.evaluator_node import evaluator_node
+from .nodes.explainer_node import explainer_node
+from .nodes.guardrail_node import nemo_guardrail_node, nemo_output_rail_node
+from .nodes.safety_node import safety_check_node
+from .nodes.supervisor_node import doer_node, thinker_node
+from .state import AgentState
+
+
+def get_side_effect_topology() -> dict[str, dict]:
+    """Return the complete side-effect topology of the governed financial advisor graph.
+
+    This is the canonical proof artifact for compliance review.  It maps every
+    annotated node name to its external mutation profile, allowing auditors to
+    inspect the complete I/O surface without running the system.
+
+    All nodes that perform external I/O are annotated with
+    ``@side_effect_node`` from
+    :mod:`src.governed_financial_advisor.graph.annotations`.  This function
+    returns a serialisation-safe snapshot of ``SIDE_EFFECT_REGISTRY`` with the
+    ``fn`` key removed so the result can be passed directly to ``json.dumps``.
+
+    Returns:
+        dict mapping node qualified name → ``{"kind": str, "external_system": str}``
+
+    Example::
+
+        topology = get_side_effect_topology()
+        # {
+        #   "execute_trade": {"kind": "api_call", "external_system": "gateway_mcp"},
+        #   "tool_executor_node": {"kind": "api_call", "external_system": "gateway_mcp"},
+        #   ...
+        # }
+    """
+    return {
+        name: {"kind": entry["kind"], "external_system": entry["external_system"]}
+        for name, entry in SIDE_EFFECT_REGISTRY.items()
+    }
+
+
+def route_after_evaluator(state: AgentState):  # type: ignore[no-untyped-def]
+    """
+    LIFECYCLE GATE: routes on the Evaluator's verdict alone.
+
+    The Evaluator's verdict is advisory — it is produced by the untrusted
+    neural plane and carries no signature (POAM-2026-079). Authority comes
+    later: FTRA, the OPA safety gate and the gateway's governor all re-check
+    the plan, and only the gateway can seal and actuate a trade.
+
+    BUG-FIX: Without a loop cap, execution_analyst → evaluator → execution_analyst
+    cycles infinitely on repeated rejection. loop_count (incremented
+    unconditionally in execution_analyst_node) caps the re-plan loop.
+
+    CTRL_FTRA_001: On APPROVED, route to ftra_node (Tier 0.5
+    commencement-time reachability gate) rather than directly to safety_check.
+    The ftra_node then routes to safety_check (CLEAR), explainer (BLOCKED), or
+    parks in DeferQueue (HITL_REQUIRED).
+    """
+    verdict = (state.get("evaluation_result") or {}).get("verdict")  # type: ignore[union-attr]
+
+    if verdict == "APPROVED":
+        return "ftra_node"  # CTRL_FTRA_001: Tier 0.5 gate before OPA
+
+    # Safety breaker: if we've looped too many times, give up gracefully
+    if (state.get("loop_count", 0) or 0) >= 3:
+        return "explainer"
+
+    # Rejected: loop back to Planner with feedback
+    return "execution_analyst"
+
+
+def _build_workflow() -> StateGraph:
+    """Build the pure graph topology without checkpointer or compilation.
+
+    This is the extracted workflow construction step used by both
+    create_graph() (Redis-checkpointed) and create_uncheckpointed_graph()
+    (LangGraph SDK delegated state). It defines the complete node set and
+    edge routing logic, returning an uncompiled StateGraph instance.
+
+    The advisor hosts no ``SymbolicGovernor``: every governance decision is a
+    network call to the gateway (POAM-2026-079).
+
+    Returns:
+        StateGraph: Uncompiled workflow topology ready for .compile().
+    """
+    workflow = StateGraph(AgentState)
+
+    # 1. Add Nodes
+    workflow.add_node(
+        "nemo_guardrail", nemo_guardrail_node
+    )  # ADR 2026-03-09: mandatory first node
+    workflow.add_node("thinker_node", thinker_node)
+    workflow.add_node("doer_node", doer_node)
+    workflow.add_node("data_analyst", data_analyst_node)
+    workflow.add_node("execution_analyst", execution_analyst_node)
+    workflow.add_node("evaluator", evaluator_node)
+    # CTRL_FTRA_001: Tier 0.5 commencement-time reachability gate.
+    # Inserted between evaluator and safety_check.  Verdicts:
+    #   CLEAR         → safety_check
+    #   HITL_REQUIRED → DeferQueue park + NodeInterrupt (→ explainer fallback)
+    #   BLOCKED       → explainer
+    workflow.add_node("ftra_node", create_ftra_node())  # type: ignore[arg-type]
+    workflow.add_node("safety_check", safety_check_node)  # type: ignore[arg-type]  # R-11: OPA pre-trade gate
+    # CAGE-REM-004: DeferQueue 4-state confidence router node
+    workflow.add_node("defer_node", defer_node)
+    # Phase 2.1: Dynamic approval node with runtime interrupt() — inserted BEFORE governed_trader
+    workflow.add_node(
+        "approval_node",
+        create_approval_node(
+            approved_target="governed_trader",
+            rejected_target="explainer",
+        ),
+    )
+    workflow.add_node("governed_trader", create_governed_trader_node())
+    workflow.add_node("explainer", explainer_node)
+    # ADR 2026-03-09b: mandatory output rail — final node on every non-blocked path
+    workflow.add_node("nemo_output_rail", nemo_output_rail_node)
+
+    # 2. Sequential Logic (Centralized)
+    # ADR 2026-03-09: NeMo guardrail is the mandatory entry point.
+    # START → nemo_guardrail → thinker_node (safe) | END (blocked)
+    workflow.set_entry_point("nemo_guardrail")
+
+    def route_after_guardrail(state: AgentState):  # type: ignore[no-untyped-def]
+        """
+        Route from the NeMo guardrail gate.
+
+        If the input was blocked, terminate immediately via END so no agent
+        ever processes the unsafe content.  The blocked path skips
+        nemo_output_rail because there is no agent-generated output to screen.
+        Otherwise proceed to thinker_node as normal.  This routing function is
+        the sole mechanism by which the guardrail result is enforced — the LLM
+        cannot influence it.
+        """
+        if state.get("guardrail_blocked"):
+            return END
+        return "thinker_node"
+
+    workflow.add_conditional_edges("nemo_guardrail", route_after_guardrail)
+    workflow.add_edge("thinker_node", "doer_node")
+
+    # Supervisor Routing — reads the explicit `next_step` field set by doer_node.
+    # This avoids fragile keyword scanning of message content (ARCH-03).
+    # BUG-FIX: "FINISH" is a valid Literal in AgentState but is NOT a node name.
+    # Returning the string "FINISH" causes LangGraph to fail with an empty-message
+    # ValueError (→ HTTP 500 {"detail":""}). Map it to the END sentinel explicitly.
+    def route_supervisor(state: AgentState):  # type: ignore[no-untyped-def]
+        next_step = state.get("next_step", END)
+        if next_step == "FINISH" or next_step is None:
+            # Route through the output rail before terminating
+            return "nemo_output_rail"
+        return next_step
+
+    workflow.add_conditional_edges("doer_node", route_supervisor)
+
+    # Lifecycle: Planner -> Evaluator -> [FTRA Tier 0.5] -> [Safety Gate] -> Trader | Re-plan
+    workflow.add_edge("execution_analyst", "evaluator")
+
+    workflow.add_conditional_edges("evaluator", route_after_evaluator)
+
+    # CTRL_FTRA_001: FTRA verdict routing
+    #   CLEAR         → safety_check (OPA pre-trade gate)
+    #   HITL_REQUIRED → explainer (NodeInterrupt parks thread; this is the fallback)
+    #   BLOCKED       → explainer
+    workflow.add_conditional_edges("ftra_node", route_after_ftra)
+
+    def route_after_safety(state: AgentState):  # type: ignore[no-untyped-def]
+        """
+        R-11 / CAGE-REM-004: Routes after the OPA pre-trade safety gate.
+
+        APPROVED / SKIPPED → approval_node when approval_required or deferred_id is set,
+                             else governed_trader
+        DEFERRED / ESCALATED / MANUAL_REVIEW → defer_node (park in DeferQueue)
+        BLOCKED → route to explainer (trade denied, explain to user)
+        """
+        status = state.get("safety_status")
+        if status in ("APPROVED", "SKIPPED"):
+            if state.get("approval_required") or state.get("deferred_id"):
+                return "approval_node"
+            return "governed_trader"
+        elif status in ("DEFERRED", "ESCALATED", "MANUAL_REVIEW"):
+            return "defer_node"
+        # BLOCKED or rejected — surface to explainer
+        return "explainer"
+
+    workflow.add_conditional_edges("safety_check", route_after_safety)
+
+    # Connect defer_node to explainer to report deferral reason
+    workflow.add_edge("defer_node", "explainer")
+
+    # ADR 2026-03-09b: every non-blocked terminal path routes through the
+    # mandatory output rail before END.  The blocked guardrail path (above)
+    # is the only path that bypasses the output rail — there is no
+    # agent-generated output to screen when the input was blocked.
+    workflow.add_edge("governed_trader", "explainer")
+    workflow.add_edge("data_analyst", "nemo_output_rail")
+    workflow.add_edge("explainer", "nemo_output_rail")
+    workflow.add_edge("nemo_output_rail", END)
+
+    return workflow
+
+
+def create_graph(redis_url=None):  # type: ignore[no-untyped-def]
+    """Create a compiled graph with Redis checkpointer (production/test mode).
+
+    Used by the standalone server. It calls _build_workflow() to construct the
+    topology, then compiles with a Redis-backed checkpointer (or MemorySaver
+    fallback).
+
+    Args:
+        redis_url: Optional Redis connection URL. Falls back to MemorySaver if None.
+
+    Returns:
+        Compiled graph with a checkpointer.  HITL suspension is dynamic —
+        ``approval_node`` calls ``interrupt()`` at runtime rather than the
+        graph declaring ``interrupt_before`` at compile time.
+    """
+    workflow = _build_workflow()
+
+    # ARCH-04: Use the Redis-backed checkpointer configured via get_checkpointer().
+    # Falls back gracefully to MemorySaver when redis_url is None (local dev/test).
+    checkpointer = get_checkpointer(redis_url)
+
+    # Provider 02 Attestation — opt-in via PROVIDER_02_ATTESTATION_ENABLED=true
+    # When enabled, a per-run callback factory is stored on the compiled graph
+    # as ``_provider_02_callback_factory`` (one callback per thread, never a
+    # shared instance accumulating steps across requests). State commitments
+    # go through GatewayClient to the gateway, which sanitizes, hashes and
+    # retains each preimage: the advisor builds no cold store and needs no
+    # storage identity ("Advisor Holds No Governance State").
+    # Zero overhead when disabled — no import, no instantiation.
+    provider_02_callback_factory = None
+    if os.environ.get("PROVIDER_02_ATTESTATION_ENABLED", "").lower() == "true":
+        try:
+            from src.cage_finance.graph_topology import FINANCIAL_ADVISOR_TOPOLOGY
+            from src.governed_financial_advisor.infrastructure.gateway_client import (
+                GatewayClient,
+            )
+            from src.integrations.provider_02 import Provider02AttestationCallback
+
+            def provider_02_callback_factory(
+                thread_id: str = "",
+            ) -> Provider02AttestationCallback:
+                return Provider02AttestationCallback(
+                    topology=FINANCIAL_ADVISOR_TOPOLOGY,
+                    committer=GatewayClient(),
+                    thread_id=thread_id,
+                )
+
+        except ImportError:
+            pass  # provider_02 adapter not available — skip silently
+
+    # Phase 2.1: Removed static interrupt_before — approval_node uses dynamic interrupt()
+    compiled = workflow.compile(checkpointer=checkpointer)
+
+    # Attach the factory for caller retrieval (does not affect graph execution)
+    compiled._provider_02_callback_factory = provider_02_callback_factory  # type: ignore[attr-defined]
+
+    return compiled
+
+
+def create_uncheckpointed_graph():  # type: ignore[no-untyped-def]
+    """Create a compiled graph without checkpointer for LangGraph SDK mode.
+
+    This entry point is used by the LangGraph SDK local development server
+    (langgraph.json). It delegates all state persistence to the LangGraph
+    Server's own in-memory or Redis-backed checkpointer, avoiding double
+    checkpointing. The HITL gate at ``approval_node`` still suspends the graph,
+    because it uses the dynamic ``interrupt()`` primitive rather than a
+    compile-time ``interrupt_before`` declaration.
+
+    Returns:
+        Compiled graph with no checkpointer.  Dynamic ``interrupt()``
+        suspension remains active; resume with ``Command(resume={...})``.
+    """
+    workflow = _build_workflow()
+
+    # Phase 2.1: Removed static interrupt_before — approval_node uses dynamic interrupt()
+    return workflow.compile()

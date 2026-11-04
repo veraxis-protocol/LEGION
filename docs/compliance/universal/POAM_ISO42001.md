@@ -1,0 +1,91 @@
+---
+poam_file: POAM_ISO42001
+region_scope: ALL
+primary_framework: "ISO/IEC 42001:2023 (AI Management System Standard)"
+global_baseline: ISO 42001
+version: "1.0"
+date: 2026-06-08
+see_also:
+  - compliance/us_fed/POAM_US_FED.md    # NIST SP 800-53 / ATO track (US_FED only)
+  - compliance/eu_ecb/POAM_EU_ECB.md    # EU AI Act / DORA / GDPR weaknesses (EU_ECB only)
+  - compliance/apac_mas/POAM_APAC_MAS.md  # MAS FEAT / Notice 655 / TRM weaknesses (APAC_MAS only)
+  - compliance/cross-region/POAM_INDEX.md     # cross-region traceability matrix
+---
+
+# Plan of Action and Milestones (POA&M) — ISO 42001 Universal
+
+**System:** Cybernetic AI Governance Engine (CAGE) — Governed Financial Advisor
+**Reference:** ISO/IEC 42001:2023 — AI Management System Standard
+**Region Scope:** ALL (`US_FED`, `EU_ECB`, `APAC_MAS`)
+**Global Baseline:** ISO/IEC 42001:2023
+**Version:** 1.0
+**Date:** 2026-06-08
+**Status:** ACTIVE
+
+> **Scope:** This document tracks weaknesses in the CAGE **ISO 42001 AI Management System (AIMS)** that apply to **all deployment regions** regardless of `CAGE_DEPLOYMENT_REGION`. Entries here are anchored to ISO 42001 Annex A controls or Clauses as their primary identifier. NIST SP 800-53, EU AI Act, and MAS FEAT control IDs appear as co-framework citations only.
+>
+> For US_FED-specific NIST SP 800-53 weaknesses, see [`compliance/us_fed/POAM_US_FED.md`](../us_fed/POAM_US_FED.md).
+> For EU_ECB-specific weaknesses, see [`compliance/eu_ecb/POAM_EU_ECB.md`](../eu_ecb/POAM_EU_ECB.md).
+> For APAC_MAS-specific weaknesses, see [`compliance/apac_mas/POAM_APAC_MAS.md`](../apac_mas/POAM_APAC_MAS.md).
+
+---
+
+## POA&M Summary
+
+| Metric          | Count |
+| --------------- | ----- |
+| **Total Items** | 8     |
+| **Critical**    | 0     |
+| **High**        | 2     |
+| **Moderate**    | 5     |
+| **Low**         | 1     |
+| **Open**        | 3     |
+| **In Progress** | 1     |
+| **Closed**      | 4     |
+
+---
+
+## POA&M Items
+
+| POA&M ID | ISO 42001 Control | Co-Frameworks | Regions | Weakness Description | Detection Method | Risk Level | Scheduled Completion | Resources Required | Status | Milestone |
+| -------- | ----------------- | ------------- | ------- | -------------------- | ---------------- | ---------- | -------------------- | ------------------ | ------ | --------- |
+| POAM-018 | §A.9.4 — Telemetry and Monitoring | NIST SP 800-53 AU-9; DORA Art. 10; MAS Notice 655 §10 | ALL | ~~Langfuse compliance project credentials fail silently when absent.~~ **✅ Closed (verified 2026-09-22).** Both remediation clauses are implemented at HEAD: (1) startup validation — `_validate_langfuse_credentials()` raises `RuntimeError` in non-development environments ([`audit_workflow.py:156`](../../../src/compliance_bridge/audit_workflow.py), commit `489949a`); (2) `/health` credential check — `GET /health` returns `langfuse_compliance_configured` ([`main.py:381,421`](../../../src/compliance_bridge/main.py), commit `fd5e28b`), asserted by [`tests/test_gateway_compliance_bridge_contract.py:164,197`](../../../tests/test_gateway_compliance_bridge_contract.py). Prior Phase 4 validation (2026-06-05) had already confirmed live credentials in-cluster. | Code review + test verification 2026-09-22 | **High** | 2026-07-15 | 4 hrs | **Closed** | Both clauses shipped. Closure verified 2026-09-22 against commits `489949a` (RuntimeError) and `fd5e28b` (`/health`). **Originally tracked in:** [`compliance/us_fed/POAM_US_FED.md#POAM-018`](../us_fed/POAM_US_FED.md) as NIST AU-9. |
+| POAM-019 | §A.9.4 — Telemetry and Monitoring | NIST SP 800-53 AU-9, SC-7; DORA Art. 10; MAS Notice 655 §10 | ALL | ~~Terraform fallback silently collapses dual-project telemetry isolation.~~ **✅ Closed (verified 2026-09-22).** The fallback was removed and replaced with fail-closed validation in commit `fd5e28b`: a `lifecycle.precondition` on the `app_secrets` module call ([`main.tf:730`](../../../infra/targets/gcp-gke/main.tf)) rejects an apply when either compliance key is empty **or** equal to its application-project counterpart; [`variables.tf:495-519`](../../../infra/targets/gcp-gke/variables.tf) declares both variables `nullable = false` with validation blocks. The precondition is stricter than the original remediation required, since it also catches credential duplication across projects. | Terraform config review 2026-09-22 | **High** | 2026-07-15 | 2 hrs | **Closed** | Fallback removed; fail-closed precondition + `nullable = false` in place. Closure verified 2026-09-22 against commit `fd5e28b`. **Originally tracked in:** [`compliance/us_fed/POAM_US_FED.md#POAM-019`](../us_fed/POAM_US_FED.md) as NIST AU-9, SC-7. |
+| ISO-001 | §A.4 — Resource Management | NIST SP 800-53 SC-5; NIST AI RMF GOVERN-1.7 | ALL | `CTRL_TQP_007` OPA runtime injection deferred. The OPA `quota_within_limits` and `token_quota_within_limits` rules in `deployment/system_authz.rego` provide secondary declarative evidence for token quota enforcement, but they currently evaluate against static policy data — not live Redis session state from `TokenQuotaProxy`. Until `governance_middleware.py` injects the current session counters into the OPA input document, the OPA rules cannot enforce the quota independently of the Python `TokenQuotaProxy`. This means OPA provides no independent verification of quota compliance. | Code review — `src/gateway/server/governance_middleware.py`, `deployment/system_authz.rego` | **Moderate** | 2026-07-31 | 8 hrs | Open | Inject Redis session state (`step_count`, `token_count`, `session_ttl`) into the OPA input document in `governance_middleware.py` before each policy evaluation; update `system_authz.rego` to evaluate against live session data; add integration test asserting OPA blocks a request when quota is exceeded. |
+| ISO-002 | §6.1 — Risk Treatment / STPA | NIST SP 800-53 SI-2; ISO 42001 §A.4 | ALL | The `TokenQuotaProxy` Unsafe Control Action (quota enforcement failure when Redis is unavailable) is not present in `config/stpa_control_structure.yaml`. The STPA compiler (`src/gateway/governance/stpa_compiler.py`) generates Rego, Colang, and Python enforcement from the STPA control structure YAML, so until the UCA is added the compiler cannot generate the corresponding enforcement artifacts and the UCA is not formally tracked in the safety case. **Correction (2026-09-22):** this item previously referred to the missing UCA as "UCA-4". That identifier is **already occupied** by an unrelated UCA — [`stpa_control_structure.yaml:256`](../../../config/stpa_control_structure.yaml) defines `UCA-4` as `execute_trade` / `stopped_too_soon` ("Agent debits account but fails to credit asset"). The quota UCA must therefore be allocated a **new, unused identifier**; adding it as "UCA-4" would collide. | Code review — `config/stpa_control_structure.yaml`, `src/gateway/governance/stpa_compiler.py` | **Moderate** | 2026-07-15 | 4 hrs | Open | Allocate an unused UCA identifier (not `UCA-4`) for the `TokenQuotaProxy` fail-CLOSED scenario and add it to `config/stpa_control_structure.yaml`; regenerate STPA artifacts (`generated_stpa_validator.py`, `generated_saga_nodes.py`); verify STPA freshness check passes in CI. |
+| ISO-003 | §9.1 — Management Review | NIST SP 800-53 CA-5; ISO 42001 §9.3 | ALL | No ISO 42001 Clause 9 management review records exist. ISO 42001 §9.1 requires the organization to evaluate the performance and effectiveness of the AIMS at planned intervals. ISO 42001 §9.3 requires management review of the AIMS including review of audit results, nonconformities, and corrective actions. No management review records have been produced for any deployment region. This is a mandatory AIMS documentation requirement independent of any regional regulatory framework. | Gap analysis — ISO 42001 §9.1, §9.3 | **Moderate** | 2026-09-30 | 8 hrs | Open | Produce first ISO 42001 §9.1 performance evaluation report covering: Lula validation results, POAM status, UCA coverage, and STPA freshness; obtain management sign-off; establish quarterly review cadence. |
+| ISO-004 | §A.6.1 — Policy Enforcement | NIST SP 800-53 CA-7; ISO 42001 §A.4 | ALL | `compliance/oscal/component-definition.yaml` missing `CTRL_TQP_007` entry. The OSCAL component definition maps technical enforcement components to ISO 42001 Annex A controls and links each to a Lula validation manifest. The `TokenQuotaProxy` (`CTRL_TQP_007`) was introduced in `fix/track-b-v2-release-gates` but has no corresponding entry in the component definition. This means the control is not formally registered in the OSCAL compliance artifact and cannot be assessed by automated Lula validation. | Documentation audit — `compliance/oscal/component-definition.yaml` | **Moderate** | 2026-06-20 | 2 hrs | **In Progress** | Add `CTRL_TQP_007` component entry to `compliance/oscal/component-definition.yaml` referencing `token_quota_proxy.py` and linking to a new `lula-validation-tqp007.yaml` manifest (stub); update `compliance/oscal/README.md`. Due within 2 business days of PR merge per `.roo/rules` §11.1. |
+| POAM-023 | §A.4 — Resource Management / §8 — Operation | NIST SP 800-53 SA-9; ISO 42001 §A.6 | ALL | ~~`AnchorageGrpcLedgerProvider` not yet implemented — FUTURE STATE.~~ **✅ Closed 2026-07-27.** External CBF ledger reconciliation is implemented via `ExternalLedgerReconciler` (`src/gateway/governance/reconciliation/daemon.py`) with pluggable `LedgerProvider` backends: `StubLedgerProvider` (dev/CI), `PlaidLedgerProvider` (production-ready, OAuth 2.0), and `AnchorageGrpcLedgerProvider` (interface contract only — `fetch_balance()` raises `NotImplementedError` pending Anchorage enterprise gRPC credentials/stubs). Reconciled balances are KMS-signed before Redis write; the CBF falls back to Redis `WATCH/MULTI/EXEC` optimistic locking and fails closed on TTL expiry when no fresh reconciled balance is available. | Architecture review — `src/gateway/governance/reconciliation/daemon.py`, `src/gateway/governance/safety/cbf_engine.py` | **Moderate** | 2026-07-27 | 40 hrs | **Closed** | Follow-up: provision Anchorage enterprise gRPC credentials and generate protobuf stubs to activate `AnchorageGrpcLedgerProvider` as an alternative to `PlaidLedgerProvider`, if Anchorage custody is preferred in a given deployment. |
+| POAM-024 | §8.4 — Operational Planning and Control | NIST SP 800-53 CA-2; ISO 42001 §9.1 | ALL | ~~Staging environment not provisioned — dev→prod promotion path lacks pre-production validation tier.~~ **✅ Closed 2026-08-29.** Ephemeral staging tier provisioned with full security posture at dev-scale cost. Three-tier promotion path (`dev → staging → prod`) now operational. Root cause: `enable_nist_compliance` was overloaded (security + redundancy), preventing security validation at 1-replica scale. Solution: decoupled into `enable_high_availability` (redundancy) and `enable_deletion_protection` (lifecycle), enabling staging to activate full security controls (`enable_nist_compliance=true`, Binary Authorization, audit logging, CMEK, PSS restricted) while running at single-replica dev-scale (`enable_high_availability=false`). Staged implementation: (1) `infra/targets/gcp-gke/staging.tfvars` created with dev-scale hardware (e2-standard-4, pd-standard, GPU scale-to-zero) and prod-equivalent security flags; (2) `deploy_all.sh` staging rejection removed, compliance injection logic extended to treat staging like prod for US_FED/EU_ECB/APAC_MAS; (3) `scripts/staging_lifecycle.sh` created for automated provision→validate→destroy cycle (~20-30 min, ~$2-4/cycle); (4) Lula validation targets cluster-scoped controls (Binary Authorization, PSS, CMEK, audit logs) — none assert on replica topology, confirming security posture is provable at 1-replica scale; (5) ADR-004 documents flag decoupling and staging tier design in `docs/operations/DEPLOYMENT_DECISION_RECORD.md`. Live validation pending: run `./scripts/staging_lifecycle.sh` to execute full Lula gate suite, region posture tests (US_FED/EU_ECB/APAC_MAS markers), and cluster-scoped control verification against live staging cluster. | Architecture review — `infra/targets/gcp-gke/staging.tfvars`, `deploy_all.sh`, `scripts/staging_lifecycle.sh`, `docs/operations/DEPLOYMENT_DECISION_RECORD.md` (ADR-004) | **Low** | 2026-08-29 | 16 hrs | **Closed** | ISO 42001 §A.5.3 CA-2 pre-production validation tier satisfied. Staging tier enables security validation before prod promotion without production-scale cost. Follow-up: Execute `./scripts/staging_lifecycle.sh` to validate all Lula gates pass at 1-replica scale (automated in Phase 3-5 of lifecycle script). |
+
+---
+
+## POA&M Process
+
+### Review Cadence
+
+- **Monthly:** Review open items, update milestones, escalate slipped items
+- **Quarterly:** ISO 42001 §9.1 management review; AO briefing on cross-region AIMS posture
+- **Annual:** Full AIMS review per ISO 42001 §9.3
+
+### Entry Criteria
+
+New entries are created when:
+
+- ISO 42001 Annex A control assessments identify weaknesses applicable to all regions
+- New governance controls are introduced without complete AIMS documentation
+- STPA compiler source changes introduce new UCAs not yet formally tracked
+- Lula validation manifests identify AIMS gaps
+
+### Closure Criteria
+
+Items are closed when:
+
+1. Remediation actions are fully implemented across all deployment regions
+2. Implementation is verified by the ISSO or Security Control Assessor
+3. Supporting evidence (code changes, Lula results, OSCAL artifacts) is archived
+4. ISO 42001 §9.1 management review records the closure
+
+---
+
+_This document is a living record and must be updated within 5 business days of any status change. For the cross-region traceability matrix, see [`compliance/cross-region/POAM_INDEX.md`](../cross-region/POAM_INDEX.md)._

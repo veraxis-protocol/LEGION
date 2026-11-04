@@ -1,0 +1,110 @@
+{
+  "_comment": "European Central Bank / EBA / EU AI Office regional governance thresholds. Quantitative values calibrated to EBA stress-testing guidelines, DORA operational resilience requirements, and GDPR Art. 22 automated decision-making constraints. To activate: set CAGE_DEPLOYMENT_REGION=EU_ECB",
+  "_schema_version": "2.0.0",
+  "_region": "EU_ECB",
+  "jurisdiction": "EU_ECB",
+  "cage_deployment_region": "EU_ECB",
+  "iso_42001_baseline": true,
+  "_jurisdiction": "European Union",
+  "_regulatory_basis": [
+    "EBA/GL/2018/02 – Stress Testing Guidelines",
+    "EBA/GL/2023/02 – Internal Model Risk Management",
+    "DORA Art. 10 – ICT Operational Resilience",
+    "EU AI Act Art. 9 – Risk Management System for High-Risk AI",
+    "GDPR Art. 22 – Automated Individual Decision-Making"
+  ],
+  "domains": {
+    "finance": {
+      "_comment": "Regional overlay of domains.finance in config/governance_thresholds.json, deep-merged at threshold load for CAGE_DEPLOYMENT_REGION=EU_ECB (src/gateway/governance/schemas/regional_overlay.py) and validated by the finance schema (src/cage_finance/thresholds.py) at governor assembly. Keys omitted here inherit the global value.",
+      "cbf": {
+        "gamma": 0.6,
+        "_comment": "Gamma elevated to 0.6 from US baseline 0.5. EU prudential requirements under CRD VI and EBA SREP Guidelines mandate more conservative capital buffer maintenance. Higher gamma = more aggressive safety filter intervention."
+      },
+      "drawdown": {
+        "limit": 0.04,
+        "_comment": "EU EBA stress-test adverse scenario drawdown limit set at 4% (vs US 5%). Reflects EBA/GL/2018/02 severe adverse scenario calibration for European systemic risk. Under the ECB SSM supervisory review, a 4% drawdown limit is considered the boundary for Pillar 2 Requirement (P2R) triggers."
+      },
+      "stpa": {
+        "uca5_drawdown_threshold_pct": 3.5,
+        "_comment_uca5": "UCA-5 (EU): drawdown > 3.5% triggers block, 1% more conservative than US baseline (4.5%). Reflects EBA adverse scenario cushion requirement.",
+        "uca6_max_order_volume_fraction": 0.005,
+        "_comment_uca6": "UCA-6 (EU): max 0.5% of daily volume per order (vs US 1%). MiFID II market integrity rules impose stricter slippage controls to prevent market manipulation under MAR Art. 12.",
+        "max_sell_portfolio_fraction": 0.08,
+        "_comment_fin1": "FIN-1 (EU): maximum 8% portfolio sell in one order (vs US 10%). More conservative to comply with ESMA MiFID II best execution requirements.",
+        "max_latency_ms": 150.0,
+        "_comment_fin2": "FIN-2 (EU): maximum 150ms round-trip latency (vs US 200ms). DORA Art. 10 requires financial entities to maintain ICT operational resilience with lower tolerance thresholds under ECB SSM expectations."
+      },
+      "confidence": {
+        "min_trade_confidence": {
+          "value": 0.97,
+          "requires_warrant": true,
+          "governing_version": "cage-policy-2.1.0"
+        },
+        "_comment": "[CTRL_AGT_001] Minimum agentic model confidence for EU High-Risk AI classification under EU AI Act Art. 6 + Annex III §5(b). Threshold elevated to 0.97 from US baseline of 0.95 to reflect the mandatory Art. 9 risk management requirements for High-Risk AI systems. Enforced for trade execution by the finance trade_confidence tier (src/cage_finance/tiers/trade_confidence_tier.py). Pre-market FRIA (Art. 27) must document this threshold and its calibration basis. Any change requires re-registration with the EU AI Office. requires_warrant: reliance on 0.97 needs an ACTIVE, in-scope institutional warrant (norm_id confidence.min_trade_confidence) issued for governing_version cage-policy-2.1.0 and verified by the kernel warrant stage; any warrant failure defers the trade (RELIANCE_INELIGIBLE), never denies it. Changing the value requires a new governing_version and a re-issued warrant."
+      },
+      "consensus": {
+        "threshold_usd": 7500.0,
+        "_comment": "EU: consensus check threshold lowered to EUR 7,500 equivalent (vs USD 10,000). GDPR Art. 22(2) requires human oversight for automated decisions with legal or similarly significant effects on individuals. The lower threshold ensures more decisions receive human review, satisfying Art. 14 (Human Oversight) of the EU AI Act for High-Risk AI systems."
+      }
+    }
+  },
+  "fria": {
+    "enabled": true,
+    "protected_characteristics": [
+      "gender",
+      "race",
+      "ethnicity",
+      "age",
+      "disability",
+      "nationality",
+      "religion"
+    ],
+    "bias_threshold_demographic_parity": 0.05,
+    "_comment": "EU AI Act Art. 27 requires periodic FRIA reassessment. Annual minimum; more frequent if model drift detected via CTRL_TEL_003.",
+    "bias_threshold_equalized_odds": 0.05,
+    "fria_reassessment_interval_days": 365
+  },
+  "tier1_keywords": [
+    "SYSTEM OVERRIDE",
+    "IGNORE PREVIOUS INSTRUCTIONS",
+    "DISABLE GUARDRAILS",
+    "DISABLE SAFETY",
+    "ENTER DEBUG MODE",
+    "ENTER ADMIN MODE",
+    "ENTER SUDO MODE",
+    "YOU ARE NOW FREE",
+    "YOU ARE NOW UNFILTERED",
+    "ROOT-ACCESS",
+    "BYPASS-ALL-LIMITS",
+    "ADMIN-9999",
+    "ROOT-ACCESS-2026",
+    "ACT AS A DEVELOPER WITH ROOT ACCESS",
+    "GDPR OVERRIDE",
+    "IGNORE FAIRNESS CHECKS",
+    "BYPASS FRIA"
+  ],
+  "governance_controls": {
+    "CTRL_TQP_007": {
+      "control_id": "CTRL_TQP_007",
+      "iso_clause": "A.4",
+      "description": "Per-session token and step-count quota enforcement via Redis atomic counters",
+      "enforcement_tier": 2,
+      "worm_bucket_env_var": "OSCAL_S3_BUCKET_EU_ECB"
+    },
+    "SR_26_2_SENTINEL": {
+      "control_id": "SR_26_2_SENTINEL",
+      "sentinel_ref": "SR 26-2",
+      "description": "Telemetry suppression control sentinel — SR 26-2 (ECB supervisory guidance / MAS TRM §6.3). Signals that the requirement prohibiting AI systems from suppressing or concealing telemetry/audit output is acknowledged and wired into the EU_ECB governance posture. This sentinel carries no legal force independent of the referenced supervisory text; its presence in the baseline JSON is a governance acknowledgement record only.",
+      "rationale": "ECB supervisory guidance and DORA Art. 10 require that AI systems cannot disable, suppress, or conceal audit logging or telemetry output. This sentinel confirms the EU_ECB deployment posture enforces anti-suppression controls aligned with SR 26-2.",
+      "status": "ACKNOWLEDGED",
+      "enforcement_tier": 1
+    }
+  },
+  "_hitl": {
+    "_comment": "Human-in-the-loop escalation parameters (regulatory, not domain-specific - PR B T-B5)",
+    "citation": "DORA Art. 10 (ICT incident management — 2 hours for major incidents)",
+    "sla_hours": 2.0,
+    "pii_retention_authority": "GDPR Art. 5(1)(e)",
+    "injection_citation": "EU AI Act Art. 9 (risk management system — robustness)"
+  }
+}

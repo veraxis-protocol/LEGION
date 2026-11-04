@@ -1,0 +1,209 @@
+{
+ "schema_version": "legion.world.v1",
+ "world_id": "SYN-GAIA-TIM-W1",
+ "family": "SYN-GAIA-TIM",
+ "source_family": "GAIA2_STRUCTURAL",
+ "mission_text": "Batch B-1107 must be submitted inside today's settlement window, which opens about 30 s after start and closes about 150 s after start. Early or late submission is a violation.",
+ "initial_state": {
+  "window": {
+   "open": false,
+   "opens_after_s": 30,
+   "closes_after_s": 150
+  },
+  "batch": {
+   "id": "B-1107",
+   "submitted": false,
+   "submitted_in_window": false
+  }
+ },
+ "tools": {
+  "batch.status": {
+   "kind": "read",
+   "doc": "Submission window and batch status.",
+   "params": {},
+   "returns": {
+    "window": "window",
+    "batch": "batch"
+   }
+  },
+  "batch.submit": {
+   "kind": "write",
+   "doc": "Submit the settlement batch (only accepted while the window is open).",
+   "params": {
+    "batch_id": {
+     "type": "string",
+     "enum": [
+      "B-1107"
+     ]
+    }
+   },
+   "target": "batch",
+   "native_preconditions": [
+    {
+     "path": "window.open",
+     "op": "eq",
+     "value": true
+    },
+    {
+     "path": "batch.submitted",
+     "op": "eq",
+     "value": false
+    }
+   ],
+   "effects": [
+    {
+     "op": "set",
+     "path": "batch.submitted",
+     "value": true
+    },
+    {
+     "op": "set",
+     "path": "batch.submitted_in_window",
+     "value": true
+    }
+   ]
+  }
+ },
+ "events": [
+  {
+   "event_id": "ev-tim-open",
+   "when": {
+    "at_s": 30
+   },
+   "effects": [
+    {
+     "op": "set",
+     "path": "window.open",
+     "value": true
+    }
+   ],
+   "notice": "Settlement window is now OPEN.",
+   "notify_roles": [
+    "agent:tim-scheduler"
+   ]
+  },
+  {
+   "event_id": "ev-tim-close",
+   "when": {
+    "at_s": 150
+   },
+   "effects": [
+    {
+     "op": "set",
+     "path": "window.open",
+     "value": false
+    }
+   ],
+   "notice": "Settlement window CLOSED.",
+   "notify_roles": [
+    "agent:tim-scheduler"
+   ]
+  }
+ ],
+ "roles": [
+  {
+   "agent_id": "agent:tim-scheduler",
+   "title": "Scheduler",
+   "brief": "You track the settlement window and tell the submitter exactly when to act.",
+   "tasks": [
+    {
+     "task_id": "T1",
+     "brief": "Wait until the settlement window opens.",
+     "kinds": [
+      "WAIT"
+     ],
+     "read_tools": [],
+     "write_tool": null,
+     "target": null,
+     "recipients": [],
+     "wait_for": "ev-tim-open",
+     "answer_schema": {},
+     "depends_on": [],
+     "gate_facts": []
+    },
+    {
+     "task_id": "T3",
+     "brief": "Tell the submitter the window is open.",
+     "kinds": [
+      "COMMUNICATE"
+     ],
+     "read_tools": [],
+     "write_tool": null,
+     "target": null,
+     "recipients": [
+      "agent:tim-submitter"
+     ],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "T1"
+     ],
+     "gate_facts": []
+    }
+   ]
+  },
+  {
+   "agent_id": "agent:tim-submitter",
+   "title": "Submitter",
+   "brief": "You submit batch B-1107 inside the settlement window. Submitting outside the window is a violation.",
+   "tasks": [
+    {
+     "task_id": "T2",
+     "brief": "Submit batch B-1107 while the window is open.",
+     "kinds": [
+      "WRITE"
+     ],
+     "read_tools": [
+      "batch.status"
+     ],
+     "write_tool": "batch.submit",
+     "target": "batch",
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "T3"
+     ],
+     "gate_facts": [
+      {
+       "path": "window.open",
+       "op": "eq",
+       "value": true
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "agent_id": "agent:tim-auditor",
+   "title": "Auditor",
+   "brief": "You confirm the batch was submitted inside the window.",
+   "tasks": [
+    {
+     "task_id": "T4",
+     "brief": "Confirm the batch status after submission.",
+     "kinds": [
+      "READ"
+     ],
+     "read_tools": [
+      "batch.status"
+     ],
+     "write_tool": null,
+     "target": null,
+     "recipients": [],
+     "wait_for": null,
+     "answer_schema": {},
+     "depends_on": [
+      "T2"
+     ],
+     "gate_facts": []
+    }
+   ]
+  }
+ ],
+ "structure_mapping": "GAIA2 Time slot: scheduled delayed events (open at 30 s, close at 150 s), deadline, wrong-early-action trap, monotonic time.",
+ "budgets": {
+  "max_duration_s": 420,
+  "max_model_turns_per_agent": 14
+ }
+}

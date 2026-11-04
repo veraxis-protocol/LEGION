@@ -1,0 +1,237 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Formal model parity test: registered tier order must match proof/model.py.
+
+The proof model defines a static TIERS tuple that specifies the formal
+ordering of governance tiers.  This test ensures that when a domain plugin
+registers its tiers via ``domain_tiers`` at construction, the resulting order
+matches the tier subsequence declared in the formal model.
+
+Option B (per the plan): The ``TIERS`` tuple in ``proof/model.py`` remains
+static; this parity test asserts that construction-time registration matches.
+"""
+
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from src.gateway.governance.contracts import CommitReceipt, MutatingTier, ReadOnlyTier
+
+pytestmark = [pytest.mark.local, pytest.mark.unit]
+
+
+class _FakeBehaviour:
+    """Minimal tier behaviour for parity testing, mixed into one tier kind."""
+
+    def __init__(self, tier_name: str, order: int):
+        self._tier_name = tier_name
+        self._order = order
+
+    @property
+    def tier_name(self) -> str:
+        return self._tier_name
+
+    @property
+    def order(self) -> int:
+        return self._order
+
+    def claims_action(self, action: str, params: dict[str, Any]) -> bool:
+        return True
+
+    async def evaluate(self, action: str, params: dict[str, Any]) -> list:
+        return []
+
+
+class _FakeReadOnly(_FakeBehaviour, ReadOnlyTier):
+    pass
+
+
+class _FakeMutating(_FakeBehaviour, MutatingTier):
+    async def commit(
+        self, action: str, params: dict[str, Any]
+    ) -> tuple[list, CommitReceipt | None]:
+        return [], None
+
+    async def rollback(
+        self, action: str, params: dict[str, Any], receipt: CommitReceipt
+    ) -> None:
+        pass
+
+    async def confirm(
+        self, action: str, params: dict[str, Any], receipt: CommitReceipt
+    ) -> None:
+        pass
+
+
+def _FakeTier(tier_name: str, phase: int, order: int) -> _FakeBehaviour:
+    """Build a read-only (phase 1) or mutating (phase 2) parity stub."""
+    return (_FakeReadOnly if phase == 1 else _FakeMutating)(tier_name, order)
+
+
+def _make_governor(classification_engine, **overrides):
+    """Create a SymbolicGovernor with mocked dependencies."""
+    from tests.fixtures.governor import make_governor
+
+    kwargs = {
+        "classifier": classification_engine,
+        "opa": MagicMock(),
+        "safety_filter": MagicMock(),
+        "consensus": MagicMock(),
+    }
+    kwargs.update(overrides)
+    return make_governor(**kwargs)
+
+
+class TestFormalModelParity:
+    """Verify registered tier names match the formal model's TIERS tuple."""
+
+    def test_financial_tiers_match_formal_model_subsequence(
+        self, classification_engine
+    ):
+        """Register tiers matching the formal model's financial-domain tiers.
+
+        The formal model in proof/model.py defines:
+            TIERS = ("ftra", "stpa", "confidence", "cbf", "opa", "fiscal",
+                     "consensus", "causal")
+
+        When a domain plugin registers its tiers with the correct order
+        values, the resulting registered_tier_names() must produce the
+        same ordering as the formal model.
+        """
+        # Import the formal model's TIERS tuple
+        import proof.model as formal_model
+
+        expected_tiers = list(formal_model.TIERS)
+
+        # Create tiers with order values matching the formal model's
+        # sequence position (0-indexed).
+        tiers = tuple(
+            _FakeTier(
+                name,
+                phase=2 if name in ("cbf", "fiscal") else 1,
+                order=idx,
+            )
+            for idx, name in enumerate(expected_tiers)
+        )
+        governor = _make_governor(classification_engine, domain_tiers=tiers)
+
+        # Verify the registered tier names, within each phase, preserve
+        # the relative order from the formal model.
+        registered = governor.registered_tier_names()
+
+        # All tier names should be present
+        assert set(registered) == set(expected_tiers)
+
+        # Within each phase, the relative ordering must match the formal model.
+        phase_1_registered = [t for t in registered if t not in ("cbf", "fiscal")]
+        phase_1_expected = [t for t in expected_tiers if t not in ("cbf", "fiscal")]
+        assert phase_1_registered == phase_1_expected, (
+            f"Phase 1 order mismatch: got {phase_1_registered}, "
+            f"expected {phase_1_expected}"
+        )
+
+        phase_2_registered = [t for t in registered if t in ("cbf", "fiscal")]
+        phase_2_expected = [t for t in expected_tiers if t in ("cbf", "fiscal")]
+        assert phase_2_registered == phase_2_expected, (
+            f"Phase 2 order mismatch: got {phase_2_registered}, "
+            f"expected {phase_2_expected}"
+        )
+
+    def test_explicit_order_prevents_alphabetic_inversion(self, classification_engine):
+        """D5 regression: alphabetic sort would put 'causal' before 'consensus'.
+
+        The formal model requires consensus (order=5) before causal (order=6).
+        Without explicit integer ordering, alphabetic sort on tier_name would
+        silently invert this to causal, consensus — breaking the proof's
+        invariant.
+        """
+        # Register in reverse alphabetic order to ensure sort uses `order` not name
+        tiers = (
+            _FakeTier("causal", phase=1, order=6),
+            _FakeTier("consensus", phase=1, order=5),
+        )
+        governor = _make_governor(classification_engine, domain_tiers=tiers)
+
+        names = governor.registered_tier_names()
+        assert names == ["consensus", "causal"], (
+            f"D5 regression: expected consensus before causal, got {names}"
+        )
+
+    def test_formal_tiers_tuple_is_stable(self):
+        """Smoke test: the TIERS tuple in proof/model.py hasn't changed unexpectedly."""
+        import proof.model as formal_model
+
+        expected = (
+            "ftra",
+            "stpa",
+            "opa",
+            "confidence",
+            "consensus",
+            "causal",
+            "cbf",
+            "fiscal",
+        )
+        assert formal_model.TIERS == expected, (
+            f"proof/model.py TIERS changed! Expected {expected}, got {formal_model.TIERS}"
+        )
+
+    def test_formal_tier_labels_exist(self):
+        """Verify TIER_LABELS contains all items in TIERS."""
+        import proof.model as formal_model
+
+        assert hasattr(formal_model, "TIER_LABELS"), (
+            "TIER_LABELS is missing from proof/model.py"
+        )
+        assert set(formal_model.TIER_LABELS.keys()) == set(formal_model.TIERS), (
+            "TIER_LABELS keys must exactly match the TIERS tuple"
+        )
+
+    def test_tier_strings_in_code_resolve_to_labels(self):
+        """Verify all 'Tier <n>' strings in src/ resolve to TIER_LABELS."""
+        import re
+        from pathlib import Path
+
+        import proof.model as formal_model
+
+        valid_labels = set(formal_model.TIER_LABELS.values())
+        # We explicitly allow 'Tier 1' through 'Tier 6' and 'Tier 0.5', 'Tier 3a', 'Tier 3b'
+        # based on valid_labels.
+        # But this test checks for any 'Tier <number>' pattern in code.
+
+        # Regex to find 'Tier <number>' or 'Tier <number><letter>'
+        pattern = re.compile(r"Tier\s+([0-9]+(?:\.[0-9]+)?(?:[a-z])?)", re.IGNORECASE)
+
+        src_dir = Path("src")
+        violations = []
+        for py_file in src_dir.rglob("*.py"):
+            if "integrations" in py_file.parts:
+                continue
+            text = py_file.read_text(encoding="utf-8")
+            for line_no, line in enumerate(text.splitlines(), 1):
+                matches = pattern.findall(line)
+                for match in matches:
+                    tier_str = f"Tier {match}"
+                    # Allow "Tier X" if it exactly matches a valid label
+                    # But case-insensitive check? Let's just normalize to Title Case
+                    tier_str = tier_str.title().replace("3A", "3a").replace("3B", "3b")
+                    if tier_str not in valid_labels:
+                        violations.append(
+                            f"{py_file}:{line_no}: Found {tier_str} which is not in TIER_LABELS"
+                        )
+
+        assert not violations, "Found unregistered Tier labels in code:\n" + "\n".join(
+            violations
+        )

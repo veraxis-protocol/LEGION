@@ -1,0 +1,35 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+ARG VLLM_BASE_IMAGE="vllm/vllm-openai:v0.7.3@sha256:4f4037303e8c7b69439db1077bb849a0823517c0f785b894dc8e96d58ef3a0c2"
+FROM ${VLLM_BASE_IMAGE}
+
+# Model weights are mirrored to GCS out-of-band by operators and streamed at
+# runtime via GKE Workload Identity (`runai_streamer`). Never pass or bake
+# Hugging Face credentials into this image.
+
+# Install RunAI model streamer and GCS backend.
+# runai-model-streamer-gcs requires google-cloud-storage for ADC auth.
+RUN pip install --no-cache-dir --upgrade \
+    runai-model-streamer \
+    runai-model-streamer-gcs \
+    google-cloud-storage
+
+# Inject runtime hook so gs:// model paths are handled transparently.
+COPY deployment/docker/vllm_sitecustomize.py /etc/python3.12/sitecustomize.py
+RUN cp -f /etc/python3.12/sitecustomize.py /usr/local/lib/python3.12/dist-packages/sitecustomize.py
+
+# The entrypoint is inherited from the vllm/vllm-openai base image:
+#   python3 -m vllm.entrypoints.openai.api_server
+# Model path, port, and other flags are passed via Kubernetes args/command.

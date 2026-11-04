@@ -1,0 +1,400 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Regression tests for the NoDirectBind exhaustive state-space proof.
+
+``proof/model.py`` is cited in CAGE_ARXIV.MD §4.4 and Appendix A, and its
+reachable-state counts are quoted verbatim in the paper and in
+``docs/architecture/FORMAL_VERIFICATION.md``.  These tests pin those numbers so that a change to
+the tier list or the transition functions cannot silently invalidate the
+published figures.
+
+If a test here fails because the model legitimately changed, update BOTH the
+expected constant below AND every location listed in
+``docs/paper/REVISION_TRACKER.md`` under "Consistency blast radius".
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import sys
+from pathlib import Path
+
+import pytest
+
+# This module is pure-stdlib (no Redis/OPA/network dependencies) and is safe
+# to run in every CI matrix leg. Without this marker, `pytest tests/ -m local`
+# (the invocation used by the `pytest-logic` CI job) silently excludes this
+# file, leaving the 38/19/35 state-count regression tests unexercised by
+# CI — only the bare `python proof/model.py` script assertions run via the
+# separate `no-direct-bind-proof` job. See REVISION_TRACKER.md.
+pytestmark = pytest.mark.local
+
+# ---------------------------------------------------------------------------
+# proof/ is not a package (no __init__.py) — load the module by path so the
+# test runs regardless of how pytest is invoked.
+# ---------------------------------------------------------------------------
+
+_MODEL_PATH = Path(__file__).resolve().parents[1] / "proof" / "model.py"
+_spec = importlib.util.spec_from_file_location("cage_proof_model", _MODEL_PATH)
+assert _spec is not None and _spec.loader is not None
+model = importlib.util.module_from_spec(_spec)
+sys.modules["cage_proof_model"] = model
+_spec.loader.exec_module(model)
+
+
+# ---------------------------------------------------------------------------
+# Published figures — these appear in the paper and must not drift silently.
+# ---------------------------------------------------------------------------
+# NOTE (C1-sub audit remediation, 2026-08-18): State counts increased due to
+# addition of NARROW and PAUSE terminal states and the soft_threshold_exceeded
+# and transient_block flags that enable them. The new counts are:
+#   - Gated: 39 (was 21)
+#   - Concurrent: 44 (was 24)
+#   - Skipped tier: 38 (was 20)
+# The ungated model remains at 19 because it does not explore NARROW/PAUSE paths.
+#
+# NOTE (Peer Review Fix, 2026-08-18): State counts increased again due to
+# addition of seal_consumed and seal_expired flags (Gap 2 alignment). These
+# model single-use seal consumption semantics per routing_seal.consume_seal().
+# The new counts are:
+#   - Gated: 40 (was 39)
+#   - Concurrent: 45 (was 44)
+#   - Skipped tier: 39 (was 38)
+# The ungated model remains at 19 (does not use seal consumption semantics).
+#
+# NOTE (ARCH-1, 2026-09-06): State counts increased due to addition of FTRA
+# (Tier 0.5) to close proof/implementation divergence. The new counts are:
+#   - Gated: 44 (was 40)
+#   - Ungated: 21 (was 19)
+#   - Concurrent: 49 (was 45)
+#   - Skipped tier: 43 (was 39)
+#
+# NOTE (refactor/prune-pause, 2026-10-01): State counts decreased because the
+# PAUSE terminal state and the transient_block flag that reached it were
+# removed; the verdict lattice is ALLOW | NARROW | REQUIRE_APPROVAL | DEFER |
+# DENY and a transient fault is a DENIED terminal. The new counts are:
+#   - Gated: 42 (was 52)
+#   - Skipped tier: 39 (was 49)
+# The ungated model remains at 21 (it never explored the PAUSE path).
+#
+# NOTE (refactor/gateway-surface-cleanup, 2026-10-01): the dead ``fria`` tier
+# was removed from TIERS (no pipeline stage of that name exists). One fewer
+# tier removes its PASS/FAIL branch states. The new counts are:
+#   - Gated: 38 (was 42)
+#   - Ungated: 19 (was 21)
+#   - Skipped tier: 35 (was 39)
+# The former EXPECTED_CONCURRENT_STATES constant was removed: no test (and no
+# function in proof/model.py) enumerated a concurrent CBF/OPA state space.
+
+EXPECTED_GATED_STATES = 38
+EXPECTED_UNGATED_STATES = 19
+EXPECTED_SKIPPED_TIER_STATES = 35  # Gap 3 and Gap 4 variants
+
+
+# ---------------------------------------------------------------------------
+# Tier tuple — C1: the model must cover every kernel stage of run_pipeline()
+# ---------------------------------------------------------------------------
+
+
+def test_tier_tuple_matches_pipeline() -> None:
+    """The modelled tiers mirror ``run_pipeline()``'s execution order.
+
+    ARCH-1: FTRA (Tier 0.5) is included to close proof/implementation
+    divergence. The order is the pipeline's: the read-only kernel stages
+    (FTRA, STPA, OPA, confidence), the phase-1 domain tiers, then the phase-2
+    tiers. There is no ``fria`` tier in the universal tuple: it is an
+    ``EU_ECB`` jurisdiction tier. Plugin tiers such as finance's ``bounding``
+    are covered structurally via ``PLUGIN_TIER_PHASE``.
+    """
+    assert model.TIERS == (
+        "ftra",
+        "stpa",
+        "opa",
+        "confidence",
+        "consensus",
+        "causal",
+        "cbf",
+        "fiscal",
+    )
+    assert model.TIERS[: len(model.KERNEL_TIERS)] == model.KERNEL_TIERS
+    phases = [model.TIER_PHASE[t] for t in model.TIERS]
+    assert phases == sorted(phases), "a phase-1 tier is modelled after a phase-2 tier"
+    assert "ftra" in model.TIERS
+
+
+def test_tier_count_is_exactly_8() -> None:
+    """Pin the number of modelled governance tiers to exactly 8.
+
+    ARCH-1 added FTRA (Tier 0.5); refactor/gateway-surface-cleanup removed the
+    dead ``fria`` tier, which no pipeline stage implemented.
+    This figure is cited in CAGE_ARXIV.MD §4.2 and §7.2 Limitations.
+    Update this constant AND every location listed in docs/paper/REVISION_TRACKER.md
+    if the pipeline adds or removes a tier.
+    """
+    assert len(model.TIERS) == 8, (
+        f"Expected exactly 8 governance tiers; got {len(model.TIERS)}: {model.TIERS}"
+    )
+
+
+def test_initial_state_has_all_tiers_pending() -> None:
+    initial = model.initial_state()
+    assert initial.phase == "PENDING"
+    assert not initial.seal_present
+    assert not initial.resolved_allow
+    assert all(result == "PENDING" for _, result in initial.tier_results)
+    assert len(initial.tier_results) == len(model.TIERS)
+
+
+# ---------------------------------------------------------------------------
+# The invariant itself
+# ---------------------------------------------------------------------------
+
+
+def test_gated_architecture_satisfies_no_direct_bind() -> None:
+    states = model.enumerate_reachable(model.gated_transitions)
+    holds, counterexample = model.check_no_direct_bind(states)
+    assert holds, f"NoDirectBind violated at {counterexample}"
+
+
+def test_gated_reachable_state_count_is_stable() -> None:
+    """Pins the figure quoted in CAGE_ARXIV.MD §4.4 and Appendix A.
+
+    # Issue #4: proof scope is EXPECTED_GATED_STATES states, no LTL — documented
+    # in §7.2 Limitations.
+    """
+    states = model.enumerate_reachable(model.gated_transitions)
+    assert len(states) == EXPECTED_GATED_STATES
+
+
+def test_exactly_one_executed_state_and_it_is_authorised() -> None:
+    states = model.enumerate_reachable(model.gated_transitions)
+    executed = [s for s in states if s.phase == "EXECUTED"]
+    assert len(executed) == 1
+    assert executed[0].resolved_allow is True
+    assert executed[0].seal_present is True
+    assert executed[0].all_tiers_passed()
+
+
+def test_seal_issued_requires_every_tier_to_pass() -> None:
+    """No SEAL_ISSUED state exists with an unresolved or failed tier."""
+    states = model.enumerate_reachable(model.gated_transitions)
+    sealed = [s for s in states if s.phase == "SEAL_ISSUED"]
+    assert sealed, "expected at least one SEAL_ISSUED state"
+    for state in sealed:
+        assert state.all_tiers_passed()
+        assert state.seal_present is True
+        assert state.resolved_allow is True
+
+
+def test_denied_states_never_carry_a_seal() -> None:
+    states = model.enumerate_reachable(model.gated_transitions)
+    for state in (s for s in states if s.phase == "DENIED"):
+        assert state.seal_present is False
+        assert state.resolved_allow is False
+
+
+# ---------------------------------------------------------------------------
+# Gap 1 — the seal gate is load-bearing (negative control)
+# ---------------------------------------------------------------------------
+
+
+def test_gap1_ungated_variant_violates_the_invariant() -> None:
+    states = model.enumerate_reachable(model.ungated_transitions)
+    holds, counterexample = model.check_no_direct_bind(states)
+    assert not holds, "the ungated variant must produce a counterexample"
+    assert counterexample is not None
+    assert counterexample.phase == "EXECUTED"
+    assert counterexample.resolved_allow is False
+    assert counterexample.seal_present is False
+
+
+def test_gap1_ungated_reachable_state_count_is_stable() -> None:
+    states = model.enumerate_reachable(model.ungated_transitions)
+    assert len(states) == EXPECTED_UNGATED_STATES
+
+
+# ---------------------------------------------------------------------------
+# C2 — concurrency: the invariant is order-independent
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("skipped_tier", ["causal"])
+def test_skipping_a_tier_preserves_structure_but_shrinks_the_gate(
+    skipped_tier: str,
+) -> None:
+    """Gap 3 (CBF tier skipped) and Gap 4 (DoWhy absent).
+
+    Marking a tier PASS without evaluating it does not break the structural
+    invariant — the seal is still issued only after the remaining tiers pass —
+    but it removes one check from the gate. Gap 3's former trigger, the
+    ``CBF_FAIL_OPEN`` flag, has been deleted from the code; Gap 4 is backed by
+    a production startup ``RuntimeError``. Removing Gap 3 from the model is
+    tracked in PR 2 task T8.
+    """
+
+    def skipping_transitions(state):  # type: ignore[no-untyped-def]
+        if state.phase == "CHECKING":
+            results = dict(state.tier_results)
+            pending = [t for t in model.TIERS if results[t] == "PENDING"]
+            if pending and pending[0] == skipped_tier:
+                results[skipped_tier] = "PASS"
+                yield model.State(
+                    phase="CHECKING",
+                    tier_results=tuple((t, results[t]) for t in model.TIERS),
+                    seal_present=False,
+                    resolved_allow=False,
+                    profile=state.profile,
+                    narrower_present=state.narrower_present,
+                    clamped_params_valid=state.clamped_params_valid,
+                )
+                return
+        yield from model.gated_transitions(state)
+
+    states = model.enumerate_reachable(skipping_transitions)
+    holds, _ = model.check_no_direct_bind(states)
+
+    assert holds, "skipping a tier must not break the structural invariant"
+    assert len(states) == EXPECTED_SKIPPED_TIER_STATES
+    # The skipped tier can never be observed as FAIL — it is never evaluated.
+    assert not any(s.tier_result(skipped_tier) == "FAIL" for s in states)
+
+
+# ---------------------------------------------------------------------------
+# C1-sub — NARROW state (audit remediation 2026-08-18); PAUSE removed 2026-10-01
+# ---------------------------------------------------------------------------
+
+
+def test_narrow_state_is_reachable_and_has_seal() -> None:
+    """NARROW is an ALLOW variant: seal issued on clamped parameters."""
+    states = model.enumerate_reachable(model.gated_transitions)
+    narrow = [s for s in states if s.phase == "NARROW"]
+    assert narrow, "expected at least one NARROW state"
+    for state in narrow:
+        assert state.seal_present is True, "NARROW must have seal_present=TRUE"
+        assert state.resolved_allow is True, "NARROW must have resolvedAllow=TRUE"
+        assert state.narrower_present is True, "NARROW implies narrower_present"
+        assert state.clamped_params_valid is True, "NARROW implies clamped_params_valid"
+
+
+def test_no_pause_phase_is_modelled_or_reachable() -> None:
+    """The model names no PAUSE: every reachable phase is in PHASES and the
+    runtime enum has no such verdict either (refactor/prune-pause)."""
+    from src.gateway.governance.decisions import GovernanceDecision
+
+    assert "PAUSE" not in model.PHASES
+    assert "TRANSIENT" not in model.VIOLATION_KINDS
+    assert not hasattr(model.State, "transient_block")
+    assert "PAUSE" not in {d.value for d in GovernanceDecision}
+    states = model.enumerate_reachable(model.gated_transitions)
+    assert all(s.phase in model.PHASES for s in states)
+    assert not any(s.phase == "PAUSE" for s in states)
+
+
+def test_narrow_is_terminal() -> None:
+    """NARROW has no successors in the gated model."""
+    states = model.enumerate_reachable(model.gated_transitions)
+    narrow = [s for s in states if s.phase == "NARROW"]
+    assert narrow
+    for state in narrow:
+        successors = list(model.gated_transitions(state))
+        assert successors == [], "NARROW must be terminal (no successors)"
+
+
+def test_narrow_satisfies_no_direct_bind() -> None:
+    """NARROW states satisfy the invariant: phase=NARROW with resolvedAllow=TRUE."""
+    states = model.enumerate_reachable(model.gated_transitions)
+    narrow = [s for s in states if s.phase == "NARROW"]
+
+    # NARROW is an ALLOW variant, so it should NOT violate the invariant.
+    # The invariant is: EXECUTED => resolvedAllow=TRUE
+    # NARROW is not EXECUTED, so the invariant doesn't apply directly.
+    # But we verify NARROW has resolvedAllow=TRUE as an ALLOW variant.
+    assert all(s.resolved_allow for s in narrow), (
+        "NARROW states must have resolvedAllow=TRUE"
+    )
+
+
+def test_ungated_narrow_variant_violates_the_invariant() -> None:
+    """Negative control: NARROW without seal produces a counterexample."""
+    states = model.enumerate_reachable(model.ungated_narrow_transitions)
+    holds, counterexample = model.check_no_direct_bind(states)
+    assert not holds, "the ungated NARROW variant must produce a counterexample"
+    assert counterexample is not None
+    assert counterexample.phase == "EXECUTED"
+    assert counterexample.resolved_allow is False
+    assert counterexample.seal_present is False
+
+
+def test_initial_state_has_no_narrow_flags() -> None:
+    """Initial state has narrower_present=FALSE and clamped_params_valid=FALSE."""
+    initial = model.initial_state()
+    assert initial.narrower_present is False
+    assert initial.clamped_params_valid is False
+
+
+# ---------------------------------------------------------------------------
+# FTRA tier verification (ARCH-1 — proof/implementation divergence closure)
+# ---------------------------------------------------------------------------
+
+
+def test_ftra_is_first_tier_in_sequence() -> None:
+    """FTRA (Tier 0.5) is the first tier in the modeled governance pipeline."""
+    assert model.TIERS[0] == "ftra"
+
+
+def test_ftra_tier_can_fail_and_block_execution() -> None:
+    """FTRA tier can independently block execution when it fails."""
+    states = model.enumerate_reachable(model.gated_transitions)
+    ftra_failed = [s for s in states if s.tier_result("ftra") == "FAIL"]
+    # Verify FTRA failures exist and lead to DENIED
+    assert ftra_failed, "expected states where FTRA fails"
+    for state in ftra_failed:
+        assert state.phase in ("DENIED", "NARROW"), (
+            "FTRA failure must lead to DENIED or NARROW phase"
+        )
+        if state.phase == "DENIED":
+            assert not state.seal_present, "FTRA DENIED must not issue seal"
+            assert not state.resolved_allow, "FTRA DENIED must not set resolvedAllow"
+
+
+def test_ftra_pass_allows_pipeline_to_continue() -> None:
+    """When FTRA passes, the governance pipeline continues to subsequent tiers."""
+    states = model.enumerate_reachable(model.gated_transitions)
+    ftra_passed = [
+        s for s in states if s.tier_result("ftra") == "PASS" and s.phase == "CHECKING"
+    ]
+    assert ftra_passed, "expected states where FTRA passes and checking continues"
+
+    # Verify that after FTRA passes, other tiers can be evaluated
+    stpa_after_ftra = [
+        s for s in ftra_passed if s.tier_result("stpa") in ("PASS", "FAIL")
+    ]
+    assert stpa_after_ftra, "STPA tier should be reachable after FTRA passes"
+
+
+def test_all_executed_states_have_ftra_pass() -> None:
+    """Every EXECUTED state must have FTRA tier passed."""
+    states = model.enumerate_reachable(model.gated_transitions)
+    executed = [s for s in states if s.phase == "EXECUTED"]
+
+    for state in executed:
+        assert state.tier_result("ftra") == "PASS", "EXECUTED state must have FTRA=PASS"
+
+
+def test_proof_script_main_runs_and_asserts_clean(capsys) -> None:  # type: ignore[no-untyped-def]
+    model.main()
+    out = capsys.readouterr().out
+    assert "All assertions passed" in out
+    assert f"({EXPECTED_GATED_STATES} states)" in out

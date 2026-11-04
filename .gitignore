@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+*.pyc
+__pycache__/
+.pytest_cache/
+.venv/
+**/tokens.json
+**/NATIVE_EVIDENCE/
+**/RUNS/
+**/hidden/
+**/private/
+evidence/qualification/

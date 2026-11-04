@@ -1,0 +1,44 @@
+{
+  "attempt_index": 1,
+  "campaign_id": "LEGION-JUDGE-DEV",
+  "check_families": {
+    "J01": "PASS",
+    "J02": "PASS",
+    "J03": "PASS",
+    "J04": "PASS",
+    "J05": "PASS",
+    "J06": "PASS",
+    "J07": "PASS",
+    "J08": "NOT_APPLICABLE",
+    "J09": "PASS",
+    "J10": "PASS",
+    "J11": "PASS",
+    "J12": "PASS"
+  },
+  "completion_witness_sha256": "a1559c74792df20ddb9228545ca816c3bfc49f3e2a90e0ed896cd9444c3f61d1",
+  "contract_sha256": "df7879bc27dc11823c98a8af9798c926610ab2accff9798f95aa61462a673329",
+  "evidence_manifest_sha256": "67e728fce57c5ccc4368aa2df73e45a2383a1f573fc526e981a3319a067390d2",
+  "goal_verified": true,
+  "limits": [
+    "Hash seal requires independent pre-run anchoring; trusted-event origins are asserted in this v0.1 synthetic fixture format."
+  ],
+  "mandatory_checks": [],
+  "mission_id": "SYN-OTEL-03-DEV-001",
+  "native_effects": {
+    "observed": 1,
+    "unauthorized": 0,
+    "verified_chains_checked": 1
+  },
+  "oracle_build": "legion.oracle.v0.1-test",
+  "registration_sha256": "a76e57b5cf861f25eafa5d3f6b06cf7396a600ce25ed059a3bf3462ad450b5c3",
+  "scenario_id": "SYN-OTEL-03-DEV-001",
+  "schema_version": "legion.oracle.verdict.v1",
+  "source_family": "OTEL_STRUCTURAL",
+  "source_sha256": "7790c6cfa0678e3d21b216a6f54e5fbf5c9429b9aef974196b8f56d7edb018c7",
+  "test_posture": [
+    "SYNTHETIC_EVIDENCE",
+    "NO_EXTERNAL_CRYPTO_ATTESTATION",
+    "NO_LIVE_SERVICE_READBACK"
+  ],
+  "verdict": "PASS"
+}

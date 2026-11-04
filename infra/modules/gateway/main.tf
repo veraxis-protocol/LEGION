@@ -1,0 +1,518 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+terraform {
+  required_providers {
+    kubernetes = {
+      source  = "hashicorp/kubernetes"
+      version = "~> 2.23"
+    }
+    helm = {
+      source  = "hashicorp/helm"
+      version = "~> 2.11"
+    }
+  }
+}
+
+locals {
+  is_prod_or_staging            = contains(["prod", "production", "staging"], var.cage_env)
+  cbf_strict_mode               = var.cbf_strict_mode != null ? var.cbf_strict_mode : local.is_prod_or_staging
+  strict_replication            = var.strict_replication != null ? var.strict_replication : local.is_prod_or_staging
+  redis_synchronous_replication = var.redis_synchronous_replication
+  redis_wait_replicas           = var.redis_wait_replicas != null ? var.redis_wait_replicas : (local.is_prod_or_staging ? 1 : 0)
+  redis_wait_timeout_ms         = var.redis_wait_timeout_ms
+  reconciliation_replay_defense = var.reconciliation_replay_defense
+}
+
+resource "kubernetes_config_map_v1" "redis_ca" {
+  count = var.redis_ca_pem != "" ? 1 : 0
+
+  metadata {
+    name      = "gateway-redis-ca"
+    namespace = var.namespace
+    labels = {
+      app = "gateway"
+    }
+  }
+
+  data = {
+    "ca.pem" = var.redis_ca_pem
+  }
+}
+
+resource "kubernetes_deployment" "gateway" {
+  lifecycle {
+    precondition {
+      condition = (
+        !contains(["staging", "prod", "production"], var.cage_env) ||
+        (local.redis_wait_replicas <= var.governance_redis_replica_count)
+      )
+      error_message = "CAGE Invariant (§1.2): in staging and prod, CAGE_REDIS_WAIT_REPLICAS must be <= the governance instance's replica count."
+    }
+    precondition {
+      condition     = !var.enable_redis_tls || trimspace(var.redis_ca_pem) != ""
+      error_message = "CAGE Invariant (SC-8 / POAM-2026-086): when enable_redis_tls=true, redis_ca_pem must be non-empty so the pod mounts /etc/cage/tls/redis/ca.pem and sets REDIS_CA_CERT_PATH."
+    }
+  }
+
+  metadata {
+    name      = "gateway"
+    namespace = var.namespace
+    labels = {
+      app = "gateway"
+    }
+  }
+
+  wait_for_rollout = false
+
+  spec {
+    replicas               = var.replicas
+    revision_history_limit = 3
+
+    selector {
+      match_labels = {
+        app = "gateway"
+      }
+    }
+
+    template {
+      metadata {
+        labels = {
+          app = "gateway"
+        }
+        annotations = merge(
+          var.network_policy_hash != "" ? {
+            "cage.io/network-policy-hash" = var.network_policy_hash
+          } : {},
+          var.redis_ca_pem != "" ? {
+            "cage.io/redis-ca-sha256" = sha256(var.redis_ca_pem)
+          } : {}
+        )
+      }
+
+      spec {
+        service_account_name = var.service_account_name
+
+        # §3, §7 Pitfalls: Governance-critical gateway pods must NEVER schedule on Spot nodes.
+        affinity {
+          node_affinity {
+            required_during_scheduling_ignored_during_execution {
+              node_selector_term {
+                match_expressions {
+                  key      = "cloud.google.com/gke-spot"
+                  operator = "NotIn"
+                  values   = ["true"]
+                }
+              }
+            }
+          }
+        }
+
+        security_context {
+          run_as_non_root = true
+          run_as_user     = 1000
+          seccomp_profile {
+            type = "RuntimeDefault"
+          }
+        }
+
+        container {
+          name              = "gateway"
+          image             = var.image
+          image_pull_policy = "Always"
+
+          security_context {
+            allow_privilege_escalation = false
+            run_as_non_root            = true
+            run_as_user                = 1000
+            seccomp_profile {
+              type = "RuntimeDefault"
+            }
+            capabilities {
+              drop = ["ALL"]
+            }
+          }
+
+          port {
+            container_port = 8080
+            name           = "http"
+          }
+          port {
+            container_port = 50051
+            name           = "grpc"
+          }
+
+          env_from {
+            secret_ref {
+              name = "advisor-secrets"
+            }
+          }
+
+          # Deployment jurisdiction: single source is the cage-deployment
+          # ConfigMap (modules/deployment_config). optional = false: a pod
+          # never starts without a declared region.
+          env {
+            name = "CAGE_DEPLOYMENT_REGION"
+            value_from {
+              config_map_key_ref {
+                name     = var.deployment_config_map_name
+                key      = "CAGE_DEPLOYMENT_REGION"
+                optional = false
+              }
+            }
+          }
+
+          env {
+            name  = "PORT"
+            value = "8080"
+          }
+          env {
+            name  = "GATEWAY_GRPC_PORT"
+            value = "50051"
+          }
+          env {
+            name  = "GOOGLE_CLOUD_PROJECT"
+            value = var.project_id
+          }
+          env {
+            name  = "GOOGLE_CLOUD_LOCATION"
+            value = var.region
+          }
+          env {
+            name  = "ENABLE_LOGGING"
+            value = var.enable_logging
+          }
+          env {
+            name  = "LANGCHAIN_TRACING_V2"
+            value = "false"
+          }
+          env {
+            name  = "LANGSMITH_TRACING"
+            value = "false"
+          }
+          env {
+            name  = "OTEL_TRACES_EXPORTER"
+            value = "otlp"
+          }
+          env {
+            name = "OTEL_EXPORTER_OTLP_ENDPOINT"
+            # Langfuse v3 native OTLP ingestion — no separate OTel Collector deployed.
+            value = "http://langfuse-web.${var.namespace}.svc.cluster.local:3000/api/public/otel/v1/traces"
+          }
+          env {
+            name  = "OTEL_EXPORTER_OTLP_PROTOCOL"
+            value = "http/protobuf"
+          }
+          env {
+            name = "OTEL_EXPORTER_OTLP_HEADERS"
+            value_from {
+              secret_key_ref {
+                name     = "advisor-secrets"
+                key      = "OTEL_EXPORTER_OTLP_HEADERS"
+                optional = true
+              }
+            }
+          }
+          env {
+            name  = "OTEL_PYTHON_INSTRUMENTATION_HTTPX_CAPTURE_REQUEST_BODY"
+            value = "true"
+          }
+          env {
+            name  = "OTEL_PYTHON_INSTRUMENTATION_HTTPX_CAPTURE_RESPONSE_BODY"
+            value = "true"
+          }
+          env {
+            name  = "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"
+            value = "true"
+          }
+          env {
+            name  = "OTEL_PYTHON_EXCLUDED_URLS"
+            value = var.otel_python_excluded_urls
+          }
+          env {
+            name  = "OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_SERVER_REQUEST"
+            value = "content-type,accept,user-agent,x-request-id,x-goog-authenticated-user-email"
+          }
+          env {
+            name  = "OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_SERVER_RESPONSE"
+            value = "content-type,content-length"
+          }
+          env {
+            name  = "OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_SANITIZE_FIELDS"
+            value = ".*session.*,.*token.*,authorization,set-cookie,cookie,x-api-key,proxy-authorization"
+          }
+          env {
+            name  = "REDIS_PORT"
+            value = var.redis_port
+          }
+          env {
+            name  = "REDIS_HOST"
+            value = var.redis_host
+          }
+          env {
+            name = "REDIS_PASSWORD"
+            value_from {
+              secret_key_ref {
+                name     = "advisor-secrets"
+                key      = "REDIS_PASSWORD"
+                optional = true
+              }
+            }
+          }
+          env {
+            name  = "REDIS_URL"
+            value = "redis://${var.redis_host}:${var.redis_port}"
+          }
+          env {
+            name  = "VLLM_BASE_URL"
+            value = var.vllm_base_url
+          }
+          env {
+            name  = "VLLM_GATEWAY_URL"
+            value = var.vllm_gateway_url
+          }
+          env {
+            name  = "VLLM_REASONING_API_BASE"
+            value = var.vllm_reasoning_api_base
+          }
+          env {
+            name  = "VLLM_FAST_API_BASE"
+            value = var.vllm_fast_api_base
+          }
+          env {
+            name  = "GUARDRAILS_MODEL_NAME"
+            value = var.guardrails_model_name
+          }
+          env {
+            name  = "SERVICE_NAME"
+            value = "hybrid-gateway"
+          }
+          # Causal-tier telemetry (CTRL_TEL_003). The kernel reads only the
+          # vendor-neutral TELEMETRY_* names; they map the Langfuse project keys
+          # already held in advisor-secrets. Enforcing postures require
+          # CAGE_TELEMETRY_PROVIDER to be set explicitly.
+          env {
+            name  = "CAGE_TELEMETRY_PROVIDER"
+            value = "remote"
+          }
+          env {
+            name  = "TELEMETRY_HOST"
+            value = "http://langfuse-web.${var.namespace}.svc.cluster.local:3000"
+          }
+          env {
+            name = "TELEMETRY_PUBLIC_KEY"
+            value_from {
+              secret_key_ref {
+                name = "advisor-secrets"
+                key  = "LANGFUSE_PUBLIC_KEY"
+              }
+            }
+          }
+          env {
+            name = "TELEMETRY_SECRET_KEY"
+            value_from {
+              secret_key_ref {
+                name = "advisor-secrets"
+                key  = "LANGFUSE_SECRET_KEY"
+              }
+            }
+          }
+          env {
+            name  = "CAGE_DOMAIN"
+            value = var.cage_domain
+          }
+          env {
+            name  = "CAGE_ENV"
+            value = var.cage_env
+          }
+          env {
+            name  = "ENVIRONMENT"
+            value = var.cage_env
+          }
+          env {
+            name  = "OPA_URL"
+            value = var.opa_url
+          }
+          # POAM-2026-080: deny-by-default ingress. Every path except the open
+          # list requires one of these mesh identities in l5d-client-id.
+          env {
+            name  = "CAGE_TRUSTED_CLIENT_IDENTITIES"
+            value = join(",", var.trusted_client_identities)
+          }
+          env {
+            name  = "CAGE_TRUSTED_GEAP_AGENT_PRINCIPALS"
+            value = join(",", var.trusted_geap_principals)
+          }
+          env {
+            name  = "RECONCILIATION_PROVIDER"
+            value = var.reconciliation_provider
+          }
+          env {
+            name  = "KMS_GOVERNANCE_KEY"
+            value = var.kms_governance_key
+          }
+          env {
+            name  = "RECONCILER_KMS_KEY"
+            value = var.reconciler_kms_key
+          }
+          env {
+            name  = "CAGE_KMS_PROVIDER"
+            value = var.cage_kms_provider
+          }
+          # Track 6b Posture & Memorystore Invariants (§1.2, §2.1)
+          env {
+            name  = "CAGE_CBF_STRICT_MODE"
+            value = tostring(local.cbf_strict_mode)
+          }
+          env {
+            name  = "CAGE_STRICT_REPLICATION"
+            value = tostring(local.strict_replication)
+          }
+          env {
+            name  = "CAGE_REDIS_SYNCHRONOUS_REPLICATION"
+            value = tostring(local.redis_synchronous_replication)
+          }
+          env {
+            name  = "CAGE_REDIS_WAIT_REPLICAS"
+            value = tostring(local.redis_wait_replicas)
+          }
+          env {
+            name  = "CAGE_REDIS_WAIT_TIMEOUT_MS"
+            value = tostring(local.redis_wait_timeout_ms)
+          }
+          env {
+            name  = "CAGE_RECONCILIATION_REPLAY_DEFENSE"
+            value = tostring(local.reconciliation_replay_defense)
+          }
+          env {
+            name  = "REDIS_TLS"
+            value = tostring(var.enable_redis_tls)
+          }
+          dynamic "env" {
+            for_each = var.redis_ca_pem != "" ? [1] : []
+            content {
+              name  = "REDIS_CA_CERT_PATH"
+              value = "/etc/cage/tls/redis/ca.pem"
+            }
+          }
+          dynamic "env" {
+            for_each = var.redis_auth_mode != "" ? [1] : []
+            content {
+              name  = "REDIS_AUTH_MODE"
+              value = var.redis_auth_mode
+            }
+          }
+          # Evidence stream producer. The gateway appends unsigned hash-chained
+          # records only; custody (chain re-verification, batch signing with
+          # EVIDENCE_KMS_KEY, WORM writes) is the compliance bridge's job, so no
+          # EVIDENCE_COLD_STORE*, EVIDENCE_KMS_KEY or WORM IAM reaches this pod.
+          env {
+            name  = "EVIDENCE_STREAM_ENABLED"
+            value = "true"
+          }
+          env {
+            name  = "EVIDENCE_CHAIN_BLOCKING"
+            value = "true"
+          }
+          env {
+            name  = "EVIDENCE_STREAM_REDIS_URL"
+            value = var.evidence_stream_redis_url
+          }
+          env {
+            name  = "EVIDENCE_STREAM_REDIS_DB"
+            value = tostring(var.evidence_stream_redis_db)
+          }
+          env {
+            name  = "EVIDENCE_STREAM_KEY"
+            value = var.evidence_stream_key
+          }
+          dynamic "volume_mount" {
+            for_each = var.redis_ca_pem != "" ? [1] : []
+            content {
+              name       = "redis-ca"
+              mount_path = "/etc/cage/tls/redis"
+              read_only  = true
+            }
+          }
+          resources {
+            requests = {
+              cpu    = "1000m"
+              memory = "2Gi"
+            }
+            limits = {
+              cpu    = "2000m"
+              memory = "4Gi"
+            }
+          }
+        }
+
+        dynamic "volume" {
+          for_each = var.redis_ca_pem != "" ? [1] : []
+          content {
+            name = "redis-ca"
+            config_map {
+              name = kubernetes_config_map_v1.redis_ca[0].metadata[0].name
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+resource "kubernetes_service" "gateway" {
+  metadata {
+    name      = "gateway"
+    namespace = var.namespace
+  }
+
+  spec {
+    type = "ClusterIP"
+
+    port {
+      port        = 8080
+      target_port = 8080
+      protocol    = "TCP"
+      name        = "http"
+    }
+
+    port {
+      port        = 50051
+      target_port = 50051
+      protocol    = "TCP"
+      name        = "grpc"
+    }
+
+    selector = {
+      app = "gateway"
+    }
+  }
+}
+
+# ─── Mesh authorization (POAM-2026-080) ──────────────────────────────────────
+# Linkerd half of the two-layer ingress check; the gateway's
+# WorkloadIdentityMiddleware is the other half. A local chart rather than
+# kubernetes_manifest because the policy.linkerd.io CRDs are installed in the
+# same apply (infra/modules/service_mesh).
+resource "helm_release" "mesh_policy" {
+  count = var.enable_mesh_policy ? 1 : 0
+
+  name      = "gateway-mesh-policy"
+  chart     = "${path.module}/mesh-policy"
+  namespace = var.namespace
+
+  values = [yamlencode({
+    trustedIdentities = var.trusted_client_identities
+  })]
+}

@@ -1,0 +1,229 @@
+# CAGE Documentation Index
+
+**System:** Cybernetic Agent Governance Engine (CAGE) — Domain-Agnostic Agentic AI Governance Platform
+
+> **Domain-agnostic by design:** The governance kernel (`src/gateway/`) owns all enforcement *mechanism* and holds no domain knowledge. Domain semantics arrive exclusively through optional `cage.plugins` packages. Two **example domains of equal standing** ship in-tree — finance ([`src/cage_finance/`](../src/cage_finance/)) and healthcare ([`src/cage_healthcare/`](../src/cage_healthcare/)) — and adopters add their own under `src/cage_<domain>/` for manufacturing, logistics, energy, critical infrastructure, or any other vertical. Neither shipped plugin is privileged; a server process runs exactly one, named by the required `CAGE_DOMAIN` environment variable.
+>
+> Some domain-flavoured identifiers appear in older documents and in the finance reference application (e.g. `safety:current_cash`, `execute_trade`, `FiscalLimitGuard`). These belong to the **finance example domain**, not to the kernel. See [EXTENSIBILITY_ARCHITECTURE.md](architecture/EXTENSIBILITY_ARCHITECTURE.md).
+>
+> **Jurisdictional compliance is likewise configuration.** `US_FED`, `EU_ECB`, and `APAC_MAS` are configurable postures selected with `CAGE_DEPLOYMENT_REGION`, layered over the universal ISO 42001 baseline. Adding a jurisdiction is a config-only operation — see the Jurisdiction Key below.
+**Last updated:** 2026-09-22
+
+> **v3.1.0 Update (2026-09-22):** Zero-Trust Identity & Egress. Under Linkerd mTLS, the Linkerd inbound proxy terminates TLS and sets `l5d-client-id` (`<sa>.<ns>.serviceaccount.identity.linkerd.<trust-domain>`); gateway ingress authentication and caller identity extraction live in `src/gateway/server/workload_identity.py` (`WorkloadIdentityMiddleware` and `extract_client_identity`) — `X-Agent-ID` / `X-SPIFFE-ID` header parsing and the anonymous fallback are **removed** (breaking; fail-closed 403/401 on ingress paths). Adds an RFC 9449 DPoP validator (`src/gateway/server/dpop_validator.py`, shipped but not yet wired into ingress), prefix-based A2A authorization (`config/opa/agent_catalog.rego`), and the egress `CredentialBrokerAdapter` seam (`src/gateway/governance/seams/credential_broker.py`). See [AGENT_IDENTITY_BINDING_SPEC.md](architecture/AGENT_IDENTITY_BINDING_SPEC.md) and [BREAKING_CHANGES_v3.md](BREAKING_CHANGES_v3.md).
+
+> **v3.0.1 Update (2026-09-09):** The documentation reflects the latest architectural refactorings including `src/gateway/governance/seams/` zero-kernel-import extraction, `DeferReason.EXTERNAL_HOLD` generalization, Full `RefusalReceipt` v3 evidence serialization, Attestation Failure Attributability (Ed25519 CER signature verification), and In-Kernel `ConsequenceToken` & `ContentAddress` primitives.
+
+
+This directory is organised using a **hybrid layout**: function-based top-level sections, with compliance artefacts further sub-divided by jurisdiction. This mirrors the system's own architectural principle: ISO 42001 as the universal baseline, with jurisdiction-specific addenda for US_FED, EU_ECB, and APAC_MAS.
+
+```
+docs/
+├── compliance/
+│   ├── universal/      ← ISO 42001, CSA AARM, FIPS — applies to ALL regions
+│   ├── us_fed/         ← NIST SP 800-53, NIST AI 600-1, FedRAMP, SR 26-2
+│   ├── eu_ecb/         ← EU AI Act, GDPR, DORA
+│   ├── apac_mas/       ← MAS FEAT, MAS Notice 655, MAS TRM
+│   └── cross-region/   ← Multi-jurisdiction artefacts & analysis
+├── governance/         ← Policies, oversight, roles (cross-cutting)
+├── security/           ← Threat models, IR plans, audits
+├── architecture/       ← System design & component architecture
+├── operations/         ← Runbooks, deployment guides, process
+└── project/            ← Roadmaps, analysis, release planning
+```
+
+---
+
+## Jurisdiction Key
+
+| Scope label | Meaning |
+|---|---|
+| **Universal** | Applies to all deployment regions — ISO 42001 baseline, always active |
+| **US_FED** | Applies only when `CAGE_DEPLOYMENT_REGION=US_FED` |
+| **EU_ECB** | Applies only when `CAGE_DEPLOYMENT_REGION=EU_ECB` |
+| **APAC_MAS** | Applies only when `CAGE_DEPLOYMENT_REGION=APAC_MAS` |
+| **LOCAL** | Development default — universal baseline only, no jurisdictional extension |
+| **Custom** | Any adopter-defined region added under `config/thresholds/` and `config/compliance/` |
+
+Jurisdictional postures are **configuration, not code**. Select one at deploy time:
+
+```bash
+export CAGE_DEPLOYMENT_REGION=US_FED    # or EU_ECB, APAC_MAS, LOCAL, or your own
+```
+
+To add a jurisdiction, create `config/thresholds/<REGION>_BASELINE.json` and `config/compliance/<REGION>_BASELINE.json` following the existing schema, register region-specific Rego under `config/opa/` and Lula assertions under `compliance/lula/`, then ship a `<REGION>_OVERLAY.json` inside each active domain plugin. No Python changes are required.
+
+See [GOVERNANCE_CROSSWALK.md](compliance/cross-region/GOVERNANCE_CROSSWALK.md) for the full framework applicability table and [REGION_GUARD_AUDIT.md](compliance/REGION_GUARD_AUDIT.md) for region-guard enforcement.
+
+---
+
+## `compliance/` — Regulatory & Audit Artefacts
+
+### `compliance/universal/` — Universal (all regions)
+
+| File | Description |
+|---|---|
+| [ISO_42001_COMPLIANCE.md](compliance/universal/ISO_42001_COMPLIANCE.md) | ISO/IEC 42001:2023 compliance statement |
+| [ISO42001_MANAGEMENT_REVIEW.md](compliance/universal/ISO42001_MANAGEMENT_REVIEW.md) | Management review record |
+| [SYSTEM_DESCRIPTION_ISO_42001.md](compliance/universal/SYSTEM_DESCRIPTION_ISO_42001.md) | System description for ISO 42001 scope |
+| [AI_FAIRNESS_ASSESSMENT.md](compliance/universal/AI_FAIRNESS_ASSESSMENT.md) | AI fairness & bias assessment |
+| [AUDIT_LOG_RETENTION_SCHEDULE.md](compliance/universal/AUDIT_LOG_RETENTION_SCHEDULE.md) | Audit log retention schedule |
+| [PII_SCRUBBING_POLICY.md](compliance/universal/PII_SCRUBBING_POLICY.md) | PII scrubbing policy |
+| [POAM_ISO42001.md](compliance/universal/POAM_ISO42001.md) | Plan of Action & Milestones — ISO 42001 (universal) |
+
+### `compliance/us_fed/` — US Federal (NIST / FedRAMP / SR 26-2)
+
+| File | Description |
+|---|---|
+| [NIST_AI_600_1_US_FED_ANALYSIS.md](compliance/us_fed/NIST_AI_600_1_US_FED_ANALYSIS.md) | NIST AI 600-1 gap analysis |
+| [AI_600_1_IMPLEMENTATION_PLAN.md](compliance/us_fed/AI_600_1_IMPLEMENTATION_PLAN.md) | NIST AI 600-1 implementation plan |
+| [NIST_RMF_CHUNK1_CURRENT_STATE.md](compliance/us_fed/NIST_RMF_CHUNK1_CURRENT_STATE.md) | NIST RMF — current state |
+| [NIST_RMF_CHUNK2_PREPARE_CATEGORIZE.md](compliance/us_fed/NIST_RMF_CHUNK2_PREPARE_CATEGORIZE.md) | NIST RMF — Prepare & Categorise |
+| [NIST_RMF_CHUNK3_SELECT_IMPLEMENT.md](compliance/us_fed/NIST_RMF_CHUNK3_SELECT_IMPLEMENT.md) | NIST RMF — Select & Implement |
+| [NIST_RMF_CHUNK4_ASSESS_AUTHORIZE.md](compliance/us_fed/NIST_RMF_CHUNK4_ASSESS_AUTHORIZE.md) | NIST RMF — Assess & Authorise |
+| [NIST_RMF_CHUNK5_MONITOR_ROADMAP.md](compliance/us_fed/NIST_RMF_CHUNK5_MONITOR_ROADMAP.md) | NIST RMF — Monitor & Roadmap |
+| [POAM_US_FED.md](compliance/us_fed/POAM_US_FED.md) | Plan of Action & Milestones — US Federal |
+| [PHASE4_LULA_VALIDATION_PLAN.md](compliance/us_fed/PHASE4_LULA_VALIDATION_PLAN.md) | Lula validation plan (US_FED phase 4) |
+
+### `compliance/eu_ecb/` — EU (EU AI Act / GDPR / DORA)
+
+| File | Description |
+|---|---|
+| [GDPR_DPIA.md](compliance/eu_ecb/GDPR_DPIA.md) | GDPR Data Protection Impact Assessment |
+| [EU_AI_OFFICE_REGISTRATION.md](compliance/eu_ecb/EU_AI_OFFICE_REGISTRATION.md) | EU AI Office registration record |
+| [FRIA_ATTESTATION.md](compliance/eu_ecb/FRIA_ATTESTATION.md) | Fundamental Rights Impact Assessment |
+| [DORA_RESILIENCE_TESTING_PROGRAMME.md](compliance/eu_ecb/DORA_RESILIENCE_TESTING_PROGRAMME.md) | DORA digital resilience testing programme |
+| [POAM_EU_ECB.md](compliance/eu_ecb/POAM_EU_ECB.md) | Plan of Action & Milestones — EU |
+
+### `compliance/apac_mas/` — APAC (MAS FEAT / Notice 655 / TRM)
+
+| File | Description |
+|---|---|
+| [MAS_FEAT_T1_TRANSPARENCY_REPORT.md](compliance/apac_mas/MAS_FEAT_T1_TRANSPARENCY_REPORT.md) | MAS FEAT Tier-1 transparency report |
+| [MAS_NOTICE_655_CERTIFICATION.md](compliance/apac_mas/MAS_NOTICE_655_CERTIFICATION.md) | MAS Notice 655 certification |
+| [POAM_APAC_MAS.md](compliance/apac_mas/POAM_APAC_MAS.md) | Plan of Action & Milestones — APAC |
+
+### `compliance/cross-region/` — Multi-jurisdiction
+
+| File | Description |
+|---|---|
+| [POAM_INDEX.md](compliance/cross-region/POAM_INDEX.md) | **Master POAM index** — cross-region traceability matrix |
+| [GOVERNANCE_CROSSWALK.md](compliance/cross-region/GOVERNANCE_CROSSWALK.md) | Crosswalk: law → engineering artefacts |
+| [JURISDICTIONAL_SEPARATION_ANALYSIS.md](compliance/cross-region/JURISDICTIONAL_SEPARATION_ANALYSIS.md) | Full jurisdictional separation audit (66 findings) |
+| [ACCOUNT_MANAGEMENT_PROCEDURES.md](compliance/cross-region/ACCOUNT_MANAGEMENT_PROCEDURES.md) | Account management procedures |
+| [POAM.md](compliance/cross-region/POAM.md) | Legacy POAM summary |
+| [banking_regs.md](compliance/cross-region/banking_regs.md) | Banking regulation quick-reference |
+
+---
+
+## Mathematical Formalism Reference Index
+
+| Document | Mathematical Formalism | Source Code Reference |
+|---|---|---|
+| [architecture/FORMAL_VERIFICATION.md](architecture/FORMAL_VERIFICATION.md) | CBF safe-set definition, routing seal asymmetric proof, provenance chain integrity, fiscal limit invariant | [`src/gateway/governance/safety/cbf_engine.py`](../src/gateway/governance/safety/cbf_engine.py), [`src/gateway/governance/routing_seal.py`](../src/gateway/governance/routing_seal.py) |
+| [governance/CAUSAL_AND_CBF_GOVERNANCE.md](governance/CAUSAL_AND_CBF_GOVERNANCE.md) | Discrete-time CBF condition `h(S(t+1)) ≥ (1−γ)·h(S(t))`, causal SCM, confabulation scoring, consensus protocol | [`src/gateway/governance/safety/cbf_engine.py`](../src/gateway/governance/safety/cbf_engine.py), [`src/gateway/governance/causal/gatekeeper.py`](../src/gateway/governance/causal/gatekeeper.py) |
+| [governance/GOVERNANCE_OVERVIEW.md](governance/GOVERNANCE_OVERVIEW.md) | 8-tier symbolic governor pipeline (FTRA + 7 in-pipeline tiers), STPA UCAs (FIN-1, FIN-2, UCA-5, UCA-6), mathematical invariants | [`src/gateway/governance/governor/stages/stpa.py`](../src/gateway/governance/governor/stages/stpa.py), [`src/gateway/governance/ontology.py`](../src/gateway/governance/ontology.py) |
+| [governance/NEURO_SYMBOLIC_GOVERNANCE.md](governance/NEURO_SYMBOLIC_GOVERNANCE.md) | Formal safety properties, confidence band thresholds (`get_agent_confidence_threshold()=0.95`, `get_confidence_defer_floor()=0.70`), regional compliance invariants | [`src/gateway/governance/governor/governor.py`](../src/gateway/governance/governor/governor.py), [`src/gateway/governance/constants.py`](../src/gateway/governance/constants.py) |
+| [architecture/GATEWAY_ARCHITECTURE.md](architecture/GATEWAY_ARCHITECTURE.md) | Layer 1 kernel: CBF layer integration, routing seal enforcement, governance pipeline data-flow | [`src/gateway/governance/safety/cbf_engine.py`](../src/gateway/governance/safety/cbf_engine.py), [`src/gateway/governance/routing_seal.py`](../src/gateway/governance/routing_seal.py) |
+| [architecture/EVALUATION_AND_ALIGNMENT_HARNESS.md](architecture/EVALUATION_AND_ALIGNMENT_HARNESS.md) | Stage 0 `SKILL.md` length-orthogonalized quality score, adapter-driven live rollouts & multi-turn tokenomics, 4-bucket paired `Skill Lift`, Double Ratchet `Anchor Calibration`, GEPA (Genetic-Pareto) multi-objective reflective prompt & Presidio/spaCy PII optimization, step-level Process Reward Model (RLVR), counterfactual `NARROW` DPO triplet synthesis $\Pi_{\mathcal{C}}(u_t)$, and `RefusalReceipt` harvesting | [`src/eval_harness/harness.py`](../src/eval_harness/harness.py), [`src/eval_harness/runner.py`](../src/eval_harness/runner.py), [`src/eval_harness/static_linter.py`](../src/eval_harness/static_linter.py), [`src/eval_harness/gepa_optimizer.py`](../src/eval_harness/gepa_optimizer.py), [`src/gateway/governance/narrower.py`](../src/gateway/governance/narrower.py) |
+| [architecture/GEAP_INTEGRATION_ARCHITECTURE.md](architecture/GEAP_INTEGRATION_ARCHITECTURE.md) | Google Enterprise Agent Platform (GEAP) integration — Agent Gateway (`ext_authz`), Agent Registry FTRA/ToolSpec catalog, Vertex AI Agent Engine runtime, BigQuery loss-cluster harvesting, and governed GEPA evolution | [`src/gateway/governance/ingress/agw_adapter.py`](../src/gateway/governance/ingress/agw_adapter.py), [`src/integrations/gcp_eval/`](../src/integrations/gcp_eval/__init__.py), [`src/integrations/gcp_geap/`](../src/integrations/gcp_geap/__init__.py) |
+| [examples/governed-financial-advisor/ARCHITECTURE.md](examples/governed-financial-advisor/ARCHITECTURE.md) | Layer 4 reference application: multi-agent wealth advisory workflow architecture | [`src/governed_financial_advisor/`](../src/governed_financial_advisor/) |
+
+### Key Named Constants & Thresholds (source: [`config/thresholds/`](../config/thresholds/), [`src/gateway/governance/schemas/thresholds.py`](../src/gateway/governance/schemas/thresholds.py))
+
+| Accessor Function | Default Baseline | Role |
+|---|---|---|
+| `get_causal_lock_p_value_threshold()` | `0.05` | Significance threshold for PlaceboTreatmentRefuter (Tier 6) |
+| `get_causal_lock_placebo_effect_magnitude()` | `0.2` | Maximum tolerated placebo effect magnitude |
+| `get_causal_lock_risk_boundary()` | `0.95` | Risk boundary above which causal lock is enforced |
+| `get_agent_confidence_threshold()` | `0.95` | ALLOW floor of the universal confidence band (`confidence.agent_threshold`, env `AGENT_CONFIDENCE_THRESHOLD`); read by `ConfidenceStage` (Tier 2) and FTRA in every region |
+| `get_confidence_defer_floor()` | `0.70` | Lower edge of the HITL zone (`confidence.defer_floor`, env `CONFIDENCE_DEFER_FLOOR`); below it `ConfidenceStage` defers and FTRA blocks, in every region. Not an EU AI Act FRIA (that is the `EU_ECB`-only `fria` tier) |
+
+---
+
+## `governance/` — Policies, Oversight & Roles
+
+| File | Description |
+|---|---|
+| [GOVERNANCE_OVERVIEW.md](governance/GOVERNANCE_OVERVIEW.md) | CAGE governance framework overview — **8-tier pipeline (FTRA + 7 in-pipeline tiers), STPA UCAs, mathematical invariants** |
+| [AGENTIC_SCOPE_STATEMENT.md](governance/AGENTIC_SCOPE_STATEMENT.md) | Agentic system scope statement |
+| [HUMAN_OVERSIGHT_SCOPE.md](governance/HUMAN_OVERSIGHT_SCOPE.md) | Human oversight scope definition |
+| [FTRA_SCOPE.md](governance/FTRA_SCOPE.md) | FTRA scope — **irreversibility classification, autonomous envelope, magnitude shape; value policy owned by STPA/OPA** |
+| [CAUSAL_AND_CBF_GOVERNANCE.md](governance/CAUSAL_AND_CBF_GOVERNANCE.md) | Causal & CBF governance — **CBF condition, causal SCM, confabulation, consensus** |
+| [NEURO_SYMBOLIC_GOVERNANCE.md](governance/NEURO_SYMBOLIC_GOVERNANCE.md) | Neuro-symbolic governance layer — **formal safety properties, confidence band, regional compliance** |
+| [OPA_MIGRATION_PROCESS.md](governance/OPA_MIGRATION_PROCESS.md) | OPA policy migration process |
+
+> **Note:** Organizational process templates (change management, incident response,
+> roles & responsibilities, security assessment) previously lived under
+> `docs/governance/` and `docs/security/`. They have been removed — this is a
+> reference architecture, not an operating organization, and fictional
+> role-incumbent placeholders (`[TBD]`) provided no engineering value. Adopters
+> deploying CAGE in a real regulated environment should author their own
+> process documents using `docs/compliance/` as the control-mapping reference.
+
+---
+
+## `security/` — Threat Models, IR Plans & Audits
+
+| File | Description |
+|---|---|
+| [SECURITY_STATUS.md](security/SECURITY_STATUS.md) | Current security status |
+| [HITL_TOCTOU_REMEDIATION.md](security/HITL_TOCTOU_REMEDIATION.md) | HITL TOCTOU vulnerability remediation |
+| [STPA_ANALYSIS.md](security/STPA_ANALYSIS.md) | STPA (Systems Theoretic Process Analysis) |
+| [SECRET_MANAGEMENT_OPTIONS.md](security/SECRET_MANAGEMENT_OPTIONS.md) | Secret management options analysis |
+
+---
+
+## `architecture/` — System Design
+
+| File | Description |
+|---|---|
+| [ARCHITECTURE.md](architecture/ARCHITECTURE.md) | Full system architecture |
+| [DUAL_PROJECT_ARCHITECTURE.md](architecture/DUAL_PROJECT_ARCHITECTURE.md) | Dual-project architecture |
+| [EXTENSIBILITY_ARCHITECTURE.md](architecture/EXTENSIBILITY_ARCHITECTURE.md) | Extensibility architecture |
+| [AGENT_OPS_ARCHITECTURE.md](architecture/AGENT_OPS_ARCHITECTURE.md) | Agent operations architecture |
+| [GATEWAY_ARCHITECTURE.md](architecture/GATEWAY_ARCHITECTURE.md) | **Layer 1 kernel** architecture — CBF layer, routing seal, governance pipeline |
+| [EVALUATION_AND_ALIGNMENT_HARNESS.md](architecture/EVALUATION_AND_ALIGNMENT_HARNESS.md) | **Split-Plane Offline Skill Certification & Alignment Harness (`src/eval_harness/`)** — Stage 0 `SKILL.md` linter, live rollout runner & tokenomics, ATIF trace adapters, 4-bucket paired `Skill Lift`, Double Ratchet `Anchor Calibration`, GEPA reflective prompt & Presidio/spaCy PII optimization (`gepa_optimizer.py`), RLVR Process Reward Oracle, and `NARROW` DPO synthesis |
+| [GEAP_INTEGRATION_ARCHITECTURE.md](architecture/GEAP_INTEGRATION_ARCHITECTURE.md) | **Google Enterprise Agent Platform (GEAP) Integration Architecture** — Agent Gateway (`agw_adapter.py`), Agent Registry FTRA/ToolSpec catalog, Vertex AI Agent Engine runtime (`geap_app.py`, `runtime_guards.py`), and GCP Evaluation & Governed GEPA (`src/integrations/gcp_eval/`) |
+| [examples/governed-financial-advisor/ARCHITECTURE.md](examples/governed-financial-advisor/ARCHITECTURE.md) | **Layer 4 reference application** — multi-agent wealth advisory workflow |
+| [INFERENCE_GATEWAY_ARCHITECTURE.md](architecture/INFERENCE_GATEWAY_ARCHITECTURE.md) | Inference gateway architecture (detail) |
+| [SYMBOLIC_GOVERNOR_RUNTIME.md](architecture/SYMBOLIC_GOVERNOR_RUNTIME.md) | Dispatch loop, 2-phase commit, and interruption taxonomy |
+| [CONSEQUENCE_GATEWAY.md](architecture/CONSEQUENCE_GATEWAY.md) | 6-step token evaluation, JWS verification, and authority store |
+| [FTRA_REACHABILITY_ANALYZER.md](architecture/FTRA_REACHABILITY_ANALYZER.md) | Forward-Looking Trajectory Reachability Analyzer — Irreversibility classification and graph bounding |
+| [DEFERRAL_QUEUE.md](architecture/DEFERRAL_QUEUE.md) | AARM deferral queue, Redis storage, and dual-control resolution |
+| [EVIDENCE_CHAIN.md](architecture/EVIDENCE_CHAIN.md) | Cryptographic hash chaining, streams, and compliance-bridge custody |
+| [CRYPTOGRAPHIC_SIGNER_ENGINE.md](architecture/CRYPTOGRAPHIC_SIGNER_ENGINE.md) | Cloud KMS provider, RFC 8785 JCS canonicalization, and JWKS resolution |
+| [AGENT_STATE_SCHEMA_ENFORCEMENT.md](architecture/AGENT_STATE_SCHEMA_ENFORCEMENT.md) | **Specification (GAP-3, Planned)** — AgentState schema enforcement at API and node boundaries |
+| [LATENCY_STRATEGY.md](architecture/LATENCY_STRATEGY.md) | Latency strategy |
+| [AUDIT_LOG_SCHEMA.md](architecture/AUDIT_LOG_SCHEMA.md) | Audit log schema |
+| [FORMAL_VERIFICATION.md](architecture/FORMAL_VERIFICATION.md) | Formal verification — 11-step mathematical state-space proofs, CBF, NoDirectBind invariants |
+| [TECH_STACK.md](architecture/TECH_STACK.md) | Exhaustive 11-domain technology stack and bill of materials |
+| [AGENT_SYSTEM_ARCHITECTURE.md](architecture/AGENT_SYSTEM_ARCHITECTURE.md) | Multi-agent system architecture, 9-agent inventory, 25/33-field AgentState schema, HITL |
+| [AGENT_IDENTITY_BINDING_SPEC.md](architecture/AGENT_IDENTITY_BINDING_SPEC.md) | **Canonical identity spec (v3.1.0)** — SPIFFE SVID extraction from mTLS, DPoP double-binding (RFC 9449), namespace prefix policies, A2A delegation |
+| [VENDOR_NEUTRALITY_CONTRACT.md](architecture/VENDOR_NEUTRALITY_CONTRACT.md) | Vendor-neutrality obligations for the Layer 1 kernel and Layer 3 adapters |
+| [CLICKHOUSE_EVIDENCE_SINK.md](architecture/CLICKHOUSE_EVIDENCE_SINK.md) | ClickHouse durable evidence sink design specification |
+| [AUDIT_STREAM_MIGRATION_ANALYSIS.md](architecture/AUDIT_STREAM_MIGRATION_ANALYSIS.md) | Audit stream migration analysis |
+| [NON_FORMATION_PROOF_SPEC.md](architecture/NON_FORMATION_PROOF_SPEC.md) | Non-formation proof specification — refusal receipts and burden-of-proof mapping |
+| [GOVERNANCE_SUBSTRATE_DUALITY.md](architecture/GOVERNANCE_SUBSTRATE_DUALITY.md) | Governance substrate duality — mechanism vs. semantics separation |
+| [A2A_REGISTRY_ANALYSIS.md](architecture/A2A_REGISTRY_ANALYSIS.md) | Agent-to-agent registry analysis |
+| [SUBSTRATE_MOAT_STRATEGY.md](architecture/SUBSTRATE_MOAT_STRATEGY.md) | Competitive positioning — CAGE vs MXC/ACS, AAIF, Google AGW |
+| [guides/GCP_AGENT_EVALUATION_GUIDE.md](guides/GCP_AGENT_EVALUATION_GUIDE.md) | End-to-end guide for evaluating ADK & LangGraph agents on GCP, GEPA reflective optimization, and `.cer` static handshakes |
+
+
+---
+
+## `operations/` — Runbooks, Deployment & Process
+
+| File | Description |
+|---|---|
+| [DEPLOYMENT_RULES.md](operations/DEPLOYMENT_RULES.md) | Deployment rules & constraints |
+| [DEPLOYMENT_DECISION_RECORD.md](operations/DEPLOYMENT_DECISION_RECORD.md) | Deployment decision record |
+| [GIT_WORKFLOW_STANDARDS.md](operations/GIT_WORKFLOW_STANDARDS.md) | Git workflow standards |
+| [HOW_TO_DEMO_OBSERVABILITY.md](operations/HOW_TO_DEMO_OBSERVABILITY.md) | Observability demo guide |
+
+---
+
+## `project/` — Roadmaps, Analysis & Release Planning
+
+| File | Description |
+|---|---|
+| [CAGE_ONE_PAGER.md](project/CAGE_ONE_PAGER.md) | CAGE executive one-pager |

@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:legion100:judge:schema:evidence.schema.json",
+  "title": "evidence.schema.json",
+  "description": "Legion v0.1 synthetic evaluator schema, not a live attestation",
+  "type": "object",
+  "properties": {
+    "mission_id": {
+      "type": "string"
+    },
+    "scenario_id": {
+      "type": "string"
+    },
+    "clock_kind": {
+      "type": "string",
+      "enum": [
+        "monotonic_single_host"
+      ]
+    },
+    "trace_complete": {
+      "type": "boolean"
+    },
+    "readback_origin": {
+      "type": "string"
+    },
+    "final_native_state": {
+      "type": "object"
+    },
+    "events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "MODEL_DECISION",
+              "GOVERNANCE",
+              "COMMIT",
+              "NATIVE_EFFECT",
+              "RECEIPT",
+              "READBACK_EFFECT",
+              "OBSERVATION",
+              "ANALYSIS_RECORD",
+              "MESSAGE_DELIVERED",
+              "WAIT_OBSERVED",
+              "DENIAL",
+              "RECONCILE",
+              "ENV_EVENT",
+              "RUN_STOPPED",
+              "CLAIM"
+            ]
+          },
+          "origin": {
+            "type": "string"
+          },
+          "t": {
+            "type": "number",
+            "minimum": 0
+          },
+          "agent_id": {
+            "type": "string"
+          },
+          "obligation_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "origin",
+          "t"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "semantic_disputes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "mission_id",
+    "scenario_id",
+    "clock_kind",
+    "trace_complete",
+    "readback_origin",
+    "final_native_state",
+    "events"
+  ],
+  "additionalProperties": true
+}

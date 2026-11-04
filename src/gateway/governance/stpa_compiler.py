@@ -1,0 +1,3068 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""
+STPA-to-Policy Compiler
+=======================
+
+CLI utility that ingests ``config/stpa_control_structure.yaml`` and emits
+deterministic, runtime-enforceable governance artifacts:
+
+  1. OPA Rego policy     → config/opa/generated_stpa_policy.rego
+  2. NeMo Colang rail    → config/rails/generated_stpa_rails.co
+  3. Python validator    → src/gateway/governance/generated_stpa_validator.py
+
+Usage::
+
+    # Compile all targets (default)
+    python -m src.gateway.governance.stpa_compiler compile
+
+    # Compile specific targets
+    python -m src.gateway.governance.stpa_compiler compile --targets opa nemo
+
+    # Validate YAML without writing files
+    python -m src.gateway.governance.stpa_compiler validate
+
+    # Show compiled output without writing (dry-run)
+    python -m src.gateway.governance.stpa_compiler compile --dry-run
+
+    # Use a custom control structure file
+    python -m src.gateway.governance.stpa_compiler compile \\
+        --input path/to/my_control_structure.yaml
+
+Exit codes:
+    0  All artifacts generated successfully (or dry-run / validate OK).
+    1  Fatal error: invalid schema, template error, or I/O failure.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime
+import logging
+import re
+import sys
+import textwrap
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Literal, get_args
+
+import yaml
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
+
+logger = logging.getLogger("stpa_compiler")
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_DEFAULT_INPUT = _REPO_ROOT / "config" / "stpa_control_structure.yaml"
+_DEFAULT_INPUT_DIR = _REPO_ROOT / "config" / "stpa"
+_DEFAULT_OPA_OUT = _REPO_ROOT / "config" / "opa" / "generated_stpa_policy.rego"
+_DEFAULT_NEMO_OUT = _REPO_ROOT / "config" / "rails" / "generated_stpa_rails.co"
+_DEFAULT_PY_OUT = _REPO_ROOT / "config" / "stpa" / "uca_rules.py"
+_DEFAULT_LG_OUT = _REPO_ROOT / "config" / "stpa" / "saga_nodes.py"
+_DEFAULT_AGP_OUT = _REPO_ROOT / "config" / "agp" / "generated_semantic_policy.txt"
+_DEFAULT_FTRA_OUT = (
+    _REPO_ROOT / "src" / "gateway" / "governance" / "terminal_action_registry.json"
+)
+_DEFAULT_REGISTRY_OUT = (
+    _REPO_ROOT / "config" / "registry" / "generated_tool_authorizations.json"
+)
+_DEFAULT_IAP_CEL_OUT = (
+    _REPO_ROOT / "config" / "registry" / "generated_iap_cel_policies.json"
+)
+_DEFAULT_SANDBOX_OUT = (
+    _REPO_ROOT / "config" / "sandbox" / "generated_sandbox_policy.yaml"
+)
+
+# AGP Semantic Governance Policy character budget (platform limit)
+_AGP_CHAR_BUDGET = 5_000
+
+# ---------------------------------------------------------------------------
+# Pydantic schema — mirrors stpa_control_structure.yaml
+# ---------------------------------------------------------------------------
+
+UcaType = Literal["not_provided", "unsafe_action", "wrong_timing", "stopped_too_soon"]
+EnforcementTarget = Literal[
+    "opa", "nemo", "python", "langgraph", "ftra", "sandbox", "openshell", "all"
+]
+OpaDecision = Literal["DENY", "GOVERNANCE_VIOLATION", "MANUAL_REVIEW", "ALLOW"]
+HttpVerb = Literal["GET", "POST", "PUT", "DELETE", "PATCH"]
+
+# ---------------------------------------------------------------------------
+# Input hardening for fields that reach the code generators.
+#
+# generate_python() and generate_langgraph() interpolate control-structure
+# string fields directly into Python source that write_artifacts() writes to
+# domain uca_rules.py / saga_nodes.py modules, which domain plugins import at
+# process start; generate_opa()
+# and generate_nemo() do the same for Rego / Colang.  A field that carries a
+# quote, brace, or newline can break out of a generated string literal,
+# f-string, or comment and inject executable code into the compiled artifact.
+# Identifier-typed fields (action names, param keys, threshold paths) are held
+# to identifier grammars; free-text fields (descriptions, messages) may not
+# carry the characters that escape a generated literal.  Both are enforced here
+# at parse time so no generator has to remember to escape.
+# ---------------------------------------------------------------------------
+
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+_ACTION_RE = re.compile(r"^(?:\*|[A-Za-z_][A-Za-z0-9_.-]*)$")
+_DOTTED_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
+_URI_ENDPOINT_RE = re.compile(
+    r"^(?:https?://)?[A-Za-z0-9.-]+(?::\d{1,5})?(?:/[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=-]*)?$"
+)
+_BINARY_PATH_RE = re.compile(r"^/[A-Za-z0-9._/-]+$")
+_MCP_METHOD_RE = re.compile(r"^[A-Za-z0-9_./:-]+$")
+_CRED_PLACEHOLDER_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+_TEXT_FORBIDDEN = ('"', "\\", "{", "}", "\n", "\r")
+
+# The only ``composite`` form: ``<lhs> > threshold_ref(<path>) * <rhs>``. Every
+# generator compiles it into an enforcing rule. Any other expression is
+# refused at parse time; it used to compile to a comment, i.e. no enforcement.
+_COMPOSITE_SCALED_THRESHOLD_RE = re.compile(
+    r"^([A-Za-z_][A-Za-z0-9_]*)\s*>\s*threshold_ref\(([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\)\s*\*\s*([A-Za-z_][A-Za-z0-9_]*)$"
+)
+
+
+def _require_pattern(value: str, pattern: re.Pattern[str], field: str) -> str:
+    if not pattern.match(value):
+        raise ValueError(
+            f"{field} must match {pattern.pattern!r}; got {value!r} — this value is "
+            "compiled into generated enforcement code and may not contain other characters"
+        )
+    return value
+
+
+def _reject_source_breaking(value: str, field: str) -> str:
+    for ch in _TEXT_FORBIDDEN:
+        if ch in value:
+            raise ValueError(
+                f"{field} may not contain {ch!r} — it is interpolated into generated "
+                "enforcement code (string literals, f-strings, and comments)"
+            )
+    return value
+
+
+# FTRA terminal classification — used by the Forward-Looking Trajectory Reachability Analyzer.
+# Fail-closed: any action not present in the compiled registry is treated as
+# IRREVERSIBLE_TERMINAL by IrreversibilityClassifier at runtime.
+TerminalClassification = Literal[
+    "IRREVERSIBLE_TERMINAL", "EXTERNALLY_REVERSIBLE", "REVERSIBLE", "READ_ONLY"
+]
+
+
+class HazardModel(BaseModel):
+    id: str
+    description: str
+    severity: Literal["critical", "high", "medium", "low"]
+
+
+class AppliesWhenModel(BaseModel):
+    """Scope a UCA condition to requests whose ``param`` equals ``equals``.
+
+    The match is a case-insensitive comparison of a string parameter. A request
+    whose ``param`` is absent, not a string, or a different value is outside the
+    UCA's scope, so the condition is not evaluated for it.
+    """
+
+    param: str
+    equals: str
+
+    @field_validator("param")
+    @classmethod
+    def _v_param(cls, v: str) -> str:
+        return _require_pattern(v, _IDENT_RE, "condition.applies_when.param")
+
+    @field_validator("equals")
+    @classmethod
+    def _v_equals(cls, v: str) -> str:
+        return _require_pattern(v, _IDENT_RE, "condition.applies_when.equals")
+
+
+class ConditionModel(BaseModel):
+    param: str | None = None
+    param_aliases: list[str] = Field(default_factory=list)
+    normalize_fraction_aliases: list[str] = Field(default_factory=list)
+    operator: (
+        Literal["is_null", "is_false", "is_true", "greater_than", "less_than", "equals"]
+        | None
+    ) = None
+    threshold_ref: str | None = None  # e.g. "stpa.max_latency_ms"
+    threshold: float | None = None  # literal value
+    semantic_pattern: str | None = None
+    # ``<lhs> > threshold_ref(<path>) * <rhs>`` only (see _COMPOSITE_SCALED_THRESHOLD_RE)
+    composite: str | None = None
+    # composite only: a missing operand is a violation (fail closed) instead of
+    # leaving the UCA unevaluated when both operands are absent.
+    require_params: bool = False
+    # Evaluate the condition only for requests in this scope (e.g. one order side).
+    applies_when: AppliesWhenModel | None = None
+
+    @field_validator("param")
+    @classmethod
+    def _v_param(cls, v: str | None) -> str | None:
+        return v if v is None else _require_pattern(v, _IDENT_RE, "condition.param")
+
+    @field_validator("param_aliases", "normalize_fraction_aliases")
+    @classmethod
+    def _v_param_aliases(cls, v: list[str], info: ValidationInfo) -> list[str]:
+        return [
+            _require_pattern(p, _IDENT_RE, f"condition.{info.field_name}") for p in v
+        ]
+
+    @field_validator("threshold_ref")
+    @classmethod
+    def _v_threshold_ref(cls, v: str | None) -> str | None:
+        return (
+            v
+            if v is None
+            else _require_pattern(v, _DOTTED_IDENT_RE, "condition.threshold_ref")
+        )
+
+    @field_validator("semantic_pattern")
+    @classmethod
+    def _v_free_text(cls, v: str | None, info: ValidationInfo) -> str | None:
+        return (
+            v
+            if v is None
+            else _reject_source_breaking(v, f"condition.{info.field_name}")
+        )
+
+    @field_validator("composite")
+    @classmethod
+    def _v_composite(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        v = v.strip()
+        if not _COMPOSITE_SCALED_THRESHOLD_RE.match(v):
+            raise ValueError(
+                "condition.composite must have the form "
+                "'<param> > threshold_ref(<path>) * <param>'; got "
+                f"{v!r}. No other composite expression can be compiled into "
+                "enforcement code, so it is refused rather than silently "
+                "unenforced"
+            )
+        return v
+
+    @model_validator(mode="after")
+    def _v_require_params(self) -> ConditionModel:
+        if self.require_params and not self.composite:
+            raise ValueError(
+                "condition.require_params applies only to a composite condition"
+            )
+        return self
+
+
+class OpaRuleModel(BaseModel):
+    decision: OpaDecision = "DENY"
+    message: str
+
+    @field_validator("message")
+    @classmethod
+    def _v_message(cls, v: str) -> str:
+        return _reject_source_breaking(v, "opa_rule.message")
+
+
+class NemoRailModel(BaseModel):
+    flow_name: str
+    message: str
+
+    @field_validator("flow_name")
+    @classmethod
+    def _v_flow_name(cls, v: str) -> str:
+        return _require_pattern(v, _IDENT_RE, "nemo_rail.flow_name")
+
+    @field_validator("message")
+    @classmethod
+    def _v_message(cls, v: str) -> str:
+        return _reject_source_breaking(v, "nemo_rail.message")
+
+
+class ParameterMappingModel(BaseModel):
+    """Maps a forward action parameter to its compensating action parameter.
+
+    Example YAML::
+
+        forward.transaction_id: compensating.target_tx_id
+        forward.amount: compensating.refund_amount
+
+    Both keys must follow the pattern ``forward.<key>`` or ``compensating.<key>``.
+    """
+
+    forward_key: str  # e.g. "transaction_id" from the forward action's context_data
+    compensating_key: str  # e.g. "target_tx_id" expected by the compensating API call
+
+    @field_validator("forward_key", "compensating_key")
+    @classmethod
+    def _v_key(cls, v: str) -> str:
+        return _require_pattern(v, _IDENT_RE, "parameter_mapping key")
+
+    @classmethod
+    def from_yaml_dict(cls, raw: dict[str, str]) -> list[ParameterMappingModel]:
+        """Parse {'forward.transaction_id': 'compensating.target_tx_id', ...}."""
+        mappings = []
+        for fwd, comp in raw.items():
+            fwd_key = fwd.removeprefix("forward.")
+            comp_key = comp.removeprefix("compensating.")
+            mappings.append(cls(forward_key=fwd_key, compensating_key=comp_key))
+        return mappings
+
+
+ExecutionType = Literal["mcp_tool", "local"]
+
+
+class SagaModel(BaseModel):
+    """LangGraph Saga configuration for a UCA.
+
+    Defined in YAML as::
+
+        langgraph_saga:
+          forward_action: execute_action
+          compensating_action: compensate_action
+          # [CTRL_WAL_002] declare execution backend so the compiler emits a
+          # real MCP call instead of a hollow stub in the WAL forward node.
+          execution_type: mcp_tool          # 'mcp_tool' | 'local'
+          mcp_tool_name: execute_action_tool  # required when execution_type=mcp_tool
+          parameter_mapping:
+            forward.transaction_id: compensating.target_tx_id
+            forward.amount: compensating.refund_amount
+    """
+
+    forward_action: str
+    compensating_action: str
+    parameter_mapping: list[ParameterMappingModel] = Field(default_factory=list)
+    # [CTRL_WAL_002] fields — control how the forward WAL node executes the action.
+    execution_type: ExecutionType = "local"
+    mcp_tool_name: str | None = None
+
+    @field_validator("forward_action", "compensating_action")
+    @classmethod
+    def _v_saga_action(cls, v: str) -> str:
+        return _require_pattern(v, _IDENT_RE, "langgraph_saga action")
+
+    @field_validator("mcp_tool_name")
+    @classmethod
+    def _v_mcp_tool_name(cls, v: str | None) -> str | None:
+        return (
+            v
+            if v is None
+            else _require_pattern(v, _IDENT_RE, "langgraph_saga.mcp_tool_name")
+        )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _parse_parameter_mapping(cls, data: Any) -> Any:
+        if isinstance(data, dict) and isinstance(data.get("parameter_mapping"), dict):
+            data["parameter_mapping"] = ParameterMappingModel.from_yaml_dict(
+                data["parameter_mapping"]
+            )
+        return data
+
+    @model_validator(mode="after")
+    def _validate_mcp_tool_name(self) -> SagaModel:
+        if self.execution_type == "mcp_tool" and not self.mcp_tool_name:
+            raise ValueError(
+                "SagaModel: mcp_tool_name is required when execution_type='mcp_tool'."
+            )
+        return self
+
+
+class SandboxRuleModel(BaseModel):
+    """Sandbox / OpenShell Supervisor enforcement rule for a UCA.
+
+    Emits deterministic network, process, and PreCredentials routing-seal rules
+    into ``config/sandbox/generated_sandbox_policy.yaml``.
+    """
+
+    allowed_endpoints: list[str] = Field(default_factory=list)
+    allowed_http_verbs: list[HttpVerb] = Field(
+        default_factory=lambda: list[HttpVerb](["POST"])
+    )
+    allowed_mcp_methods: list[str] = Field(default_factory=list)
+    allowed_binaries: list[str] = Field(default_factory=list)
+    require_routing_seal: bool = True
+    credential_placeholder: str | None = None
+
+    @field_validator("allowed_endpoints")
+    @classmethod
+    def _v_endpoints(cls, v: list[str]) -> list[str]:
+        for ep in v:
+            _reject_source_breaking(ep, "sandbox_rule.allowed_endpoints")
+            _require_pattern(ep, _URI_ENDPOINT_RE, "sandbox_rule.allowed_endpoints")
+        return v
+
+    @field_validator("allowed_mcp_methods")
+    @classmethod
+    def _v_mcp_methods(cls, v: list[str]) -> list[str]:
+        return [
+            _require_pattern(m, _MCP_METHOD_RE, "sandbox_rule.allowed_mcp_methods")
+            for m in v
+        ]
+
+    @field_validator("allowed_binaries")
+    @classmethod
+    def _v_binaries(cls, v: list[str]) -> list[str]:
+        for b in v:
+            _reject_source_breaking(b, "sandbox_rule.allowed_binaries")
+            _require_pattern(b, _BINARY_PATH_RE, "sandbox_rule.allowed_binaries")
+            if ".." in b.split("/"):
+                raise ValueError(
+                    f"sandbox_rule.allowed_binaries may not contain '..' path traversal: {b!r}"
+                )
+        return v
+
+    @field_validator("credential_placeholder")
+    @classmethod
+    def _v_credential_placeholder(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        return _require_pattern(
+            v, _CRED_PLACEHOLDER_RE, "sandbox_rule.credential_placeholder"
+        )
+
+
+class UCAModel(BaseModel):
+    id: str
+    action: str
+    uca_type: UcaType
+    hazard_refs: list[str]
+    description: str
+    condition: ConditionModel
+    enforcement: list[EnforcementTarget]
+    opa_rule: OpaRuleModel | None = None
+    nemo_rail: NemoRailModel | None = None
+    langgraph_saga: SagaModel | None = None
+    sandbox_rule: SandboxRuleModel | None = None
+    # FTRA: commencement-time worst-case reachability classification.
+    # Fail-closed: IrreversibilityClassifier treats absent entries as IRREVERSIBLE_TERMINAL.
+    terminal_classification: TerminalClassification | None = None
+
+    @field_validator("id")
+    @classmethod
+    def _v_id(cls, v: str) -> str:
+        return _require_pattern(v, _ID_RE, "uca.id")
+
+    @field_validator("action")
+    @classmethod
+    def _v_action(cls, v: str) -> str:
+        return _require_pattern(v, _ACTION_RE, "uca.action")
+
+    @field_validator("description")
+    @classmethod
+    def _v_description(cls, v: str) -> str:
+        return _reject_source_breaking(v, "uca.description")
+
+    @model_validator(mode="after")
+    def _validate_enforcement_deps(self) -> UCAModel:
+        if "opa" in self.enforcement or "all" in self.enforcement:
+            if self.opa_rule is None:
+                raise ValueError(
+                    f"{self.id}: enforcement includes 'opa' but opa_rule is missing."
+                )
+        if "nemo" in self.enforcement or "all" in self.enforcement:
+            if self.nemo_rail is None:
+                raise ValueError(
+                    f"{self.id}: enforcement includes 'nemo' but nemo_rail is missing."
+                )
+        if "langgraph" in self.enforcement:
+            if self.langgraph_saga is None:
+                raise ValueError(
+                    f"{self.id}: enforcement includes 'langgraph' but langgraph_saga is missing."
+                )
+        if "sandbox" in self.enforcement or "openshell" in self.enforcement:
+            if self.sandbox_rule is None:
+                raise ValueError(
+                    f"{self.id}: enforcement includes 'sandbox' but sandbox_rule is missing."
+                )
+        return self
+
+
+class ConstraintModel(BaseModel):
+    id: str
+    description: str
+    logic: str
+    scope: list[str]
+    uca_ref: str | None = None
+
+
+class RbacRoleModel(BaseModel):
+    name: str
+    allowed_actions: list[str]
+    action: str | None = None
+    subject_field: str = "role"
+    magnitude_field: str = "magnitude"
+    denylist_field: str = "resource"
+    limits: dict[str, Any] | None = None
+    restrictions: list[dict[str, Any]] | None = None
+
+
+class RbacRulesModel(BaseModel):
+    roles: list[RbacRoleModel]
+
+
+class SystemModel(BaseModel):
+    name: str
+    version: str
+    description: str
+    controller: str
+    controlled_process: str
+    domain: str = "core"
+    sensors: list[str] = Field(default_factory=list)
+
+    @field_validator("name", "version", "domain")
+    @classmethod
+    def _v_banner_field(cls, v: str) -> str:
+        # name and version are interpolated into the `# System: ...` header
+        # comment of every generated artifact, including the Python ones.
+        return _reject_source_breaking(v, "system field")
+
+
+class ControlStructureModel(BaseModel):
+    """Root schema for stpa_control_structure.yaml."""
+
+    system: SystemModel
+    hazards: list[HazardModel]
+    control_actions: list[dict[str, Any]]  # kept flexible for param specs
+    unsafe_control_actions: list[UCAModel]
+    safety_constraints: list[ConstraintModel]
+    rbac_rules: RbacRulesModel | None = None
+
+    @field_validator("control_actions")
+    @classmethod
+    def _v_control_action_classification(
+        cls, actions: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        # A control action may declare its FTRA classification directly. This
+        # is how a read-only action is registered without inventing an unsafe
+        # control action for it.
+        allowed = get_args(TerminalClassification)
+        for action in actions:
+            classification = action.get("terminal_classification")
+            if classification is not None and classification not in allowed:
+                raise ValueError(
+                    f"control action {action.get('name')!r}: terminal_classification "
+                    f"{classification!r} is not one of {allowed}"
+                )
+        return actions
+
+    @field_validator("unsafe_control_actions")
+    @classmethod
+    def _unique_uca_ids(cls, ucas: list[UCAModel]) -> list[UCAModel]:
+        ids = [u.id for u in ucas]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Duplicate UCA IDs found in unsafe_control_actions.")
+        return ucas
+
+    @classmethod
+    def merge(cls, models: list[ControlStructureModel]) -> ControlStructureModel:
+        """Merge multiple ControlStructureModels into one, deterministically.
+
+        Rules:
+        - ``system``: taken from the first model (caller must order
+          meaningfully; typically the core system file comes first).
+        - ``hazards``: union, sorted by ``id``; duplicate IDs are fatal.
+        - ``control_actions``: union deduplicated by action ``name``,
+          sorted by ``name``; duplicate names are fatal.
+        - ``unsafe_control_actions``: union, sorted by ``id``; duplicate IDs
+          are fatal (mirrors the existing _unique_uca_ids validator, but
+          across files instead of within one file).
+        - ``safety_constraints``: union, sorted by ``id``; duplicate IDs are
+          fatal.
+        - ``rbac_rules``: roles merged by ``name`` with last-writer-wins on
+          duplicate role names (a warning is logged); result sorted by name.
+        - ``hazard_refs`` integrity: every UCA hazard_ref across the merged
+          corpus must resolve to a hazard present in the merged hazards list.
+          Unresolved references are fatal.
+
+        Returns the merged ``ControlStructureModel``.
+        """
+        if not models:
+            raise ValueError("merge() requires at least one model")
+
+        # System — first model wins
+        merged_system = models[0].system
+
+        # Hazards — union, duplicate IDs fatal, sort by id
+        hazard_map: dict[str, HazardModel] = {}
+        for m in models:
+            for h in m.hazards:
+                if h.id in hazard_map:
+                    raise ValueError(
+                        f"Duplicate hazard ID '{h.id}' found across STPA source files."
+                    )
+                hazard_map[h.id] = h
+        merged_hazards = sorted(hazard_map.values(), key=lambda h: h.id)
+
+        # Control actions — union deduplicated by name, duplicates fatal
+        action_map: dict[str, dict] = {}
+        for m in models:
+            for ca in m.control_actions:
+                name = ca.get("name", "")
+                if name in action_map:
+                    raise ValueError(
+                        f"Duplicate control action name '{name}' found across STPA source files."
+                    )
+                action_map[name] = ca
+        merged_actions = [action_map[k] for k in sorted(action_map)]
+
+        # UCAs — union, duplicate IDs fatal, sort by id
+        uca_map: dict[str, UCAModel] = {}
+        for m in models:
+            for uca in m.unsafe_control_actions:
+                if uca.id in uca_map:
+                    raise ValueError(
+                        f"Duplicate UCA ID '{uca.id}' found across STPA source files."
+                    )
+                uca_map[uca.id] = uca
+        merged_ucas = sorted(uca_map.values(), key=lambda u: u.id)
+
+        # Safety constraints — union, duplicate IDs fatal, sort by id
+        constraint_map: dict[str, ConstraintModel] = {}
+        for m in models:
+            for c in m.safety_constraints:
+                if c.id in constraint_map:
+                    raise ValueError(
+                        f"Duplicate constraint ID '{c.id}' found across STPA source files."
+                    )
+                constraint_map[c.id] = c
+        merged_constraints = sorted(constraint_map.values(), key=lambda c: c.id)
+
+        # RBAC — merge roles by name (last-writer-wins on duplicates)
+        role_map: dict[str, RbacRoleModel] = {}
+        for m in models:
+            if m.rbac_rules is not None:
+                for role in m.rbac_rules.roles:
+                    if role.name in role_map:
+                        logger.warning(
+                            "RBAC role '%s' defined in multiple STPA files; last-writer wins.",
+                            role.name,
+                        )
+                    role_map[role.name] = role
+        merged_rbac = (
+            RbacRulesModel(roles=sorted(role_map.values(), key=lambda r: r.name))
+            if role_map
+            else None
+        )
+
+        # Cross-file referential integrity: every hazard_ref must resolve
+        merged_hazard_ids = set(hazard_map)
+        for uca in merged_ucas:
+            for ref in uca.hazard_refs:
+                if ref not in merged_hazard_ids:
+                    raise ValueError(
+                        f"UCA '{uca.id}' references hazard '{ref}' which is not defined "
+                        f"in any of the merged STPA source files."
+                    )
+
+        # Construct via model_validate to bypass the field validators
+        # (which re-check unique IDs on the already-deduplicated lists).
+        return cls.model_validate(
+            {
+                "system": merged_system.model_dump(),
+                "hazards": [h.model_dump() for h in merged_hazards],
+                "control_actions": merged_actions,
+                "unsafe_control_actions": [u.model_dump() for u in merged_ucas],
+                "safety_constraints": [c.model_dump() for c in merged_constraints],
+                "rbac_rules": merged_rbac.model_dump() if merged_rbac else None,
+            }
+        )
+
+
+# ---------------------------------------------------------------------------
+# Code-generation helpers
+# ---------------------------------------------------------------------------
+
+_BANNER = """\
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# =============================================================================
+# AUTO-GENERATED by stpa_compiler — DO NOT EDIT
+# Source: config/stpa_control_structure.yaml
+# Generated: {timestamp}
+# =============================================================================
+"""
+
+
+def _banner() -> str:
+    return _BANNER.format(
+        timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat()
+    )
+
+
+# ---------------------------------------------------------------------------
+# OPA Rego generator
+# ---------------------------------------------------------------------------
+
+
+def generate_opa(cs: ControlStructureModel) -> str:
+    """Generate an OPA Rego policy from the control structure."""
+    lines: list[str] = [
+        _banner(),
+        f"# System: {cs.system.name} v{cs.system.version}",
+        "#",
+        "# This policy enforces STPA Unsafe Control Actions (UCAs) identified in",
+        "# config/stpa_control_structure.yaml.  It is loaded by OPA alongside",
+        "# trade_governance.rego (which owns RBAC rules).",
+        "#",
+        "package stpa.generated",
+        "",
+        "import rego.v1",
+        "",
+        "# Fail-closed default: any action not explicitly allowed is denied.",
+        "default stpa_allow = false",
+        "",
+        "# ---------------------------------------------------------------------------",
+        "# STPA safety constraints",
+        "# ---------------------------------------------------------------------------",
+        "",
+    ]
+
+    # Group UCAs by action for clearer output
+    uca_by_action: dict[str, list[UCAModel]] = {}
+    for uca in cs.unsafe_control_actions:
+        if "opa" in uca.enforcement or "all" in uca.enforcement:
+            uca_by_action.setdefault(uca.action, []).append(uca)
+
+    for action, ucas in uca_by_action.items():
+        lines.append(f"# --- Action: {action} ---")
+        for uca in ucas:
+            assert uca.opa_rule is not None  # validated by Pydantic
+            cond = uca.condition
+            lines.append(f"# {uca.id}: {uca.description}")
+
+            # Build the violation rule
+            rule_name = f"stpa_violation_{uca.id.lower().replace('-', '_')}"
+            scope_lines = [f'    input.action == "{action}"']
+            if cond.applies_when:
+                scope_lines.append(
+                    f"    lower(input.{cond.applies_when.param}) == "
+                    f'"{cond.applies_when.equals.lower()}"'
+                )
+            lines.append(f"{rule_name} := msg if {{")
+            lines.extend(scope_lines)
+
+            if cond.param and cond.operator:
+                param = cond.param
+                op = cond.operator
+                if op == "is_null":
+                    lines.append(f"    not input.{param}")
+                elif op == "is_false":
+                    lines.append(f"    input.{param} == false")
+                elif op == "is_true":
+                    lines.append(f"    input.{param} == true")
+                elif op == "greater_than":
+                    if cond.threshold is not None:
+                        lines.append(f"    input.{param} > {cond.threshold}")
+                    elif cond.threshold_ref:
+                        ref_comment = f"  # threshold from governance_thresholds.json:{cond.threshold_ref}"
+                        lines.append(
+                            f"    input.{param} > input._thresholds.{cond.threshold_ref.replace('.', '_')}{ref_comment}"
+                        )
+                elif op == "less_than":
+                    if cond.threshold is not None:
+                        lines.append(f"    input.{param} < {cond.threshold}")
+                    elif cond.threshold_ref:
+                        lines.append(
+                            f"    input.{param} < input._thresholds.{cond.threshold_ref.replace('.', '_')}"
+                        )
+            elif cond.composite:
+                lhs, ref, rhs = _composite_parts(cond.composite)
+                lines.append(f"    # composite: {cond.composite}")
+                lines.append(
+                    f"    input.{lhs} > input._thresholds.{ref.replace('.', '_')} * input.{rhs}"
+                )
+
+            lines.append(f'    msg := "{uca.opa_rule.message}"')
+            lines.append("}")
+            lines.append("")
+
+            if cond.composite and cond.require_params:
+                # Fail closed: a missing or non-numeric operand fires the rule.
+                for operand in _composite_parts(cond.composite)[::2]:
+                    lines.append(f"{rule_name} := msg if {{")
+                    lines.extend(scope_lines)
+                    lines.append(f"    not is_number(input.{operand})")
+                    lines.append(f'    msg := "{uca.opa_rule.message}"')
+                    lines.append("}")
+                    lines.append("")
+
+    # Aggregate deny rule
+    lines += [
+        "# ---------------------------------------------------------------------------",
+        "# Aggregate: deny if any STPA violation fires",
+        "# ---------------------------------------------------------------------------",
+        "",
+    ]
+
+    for uca in cs.unsafe_control_actions:
+        if "opa" in uca.enforcement or "all" in uca.enforcement:
+            rule_name = f"stpa_violation_{uca.id.lower().replace('-', '_')}"
+            lines.append(f"stpa_violations contains msg if msg := {rule_name}")
+
+    lines += [
+        "",
+        "stpa_allow if {",
+        "    count(stpa_violations) == 0",
+        "}",
+        "",
+    ]
+
+    # RBAC rules if present
+    if cs.rbac_rules:
+        lines += [
+            "# ---------------------------------------------------------------------------",
+            "# RBAC rules (compiled from stpa_control_structure.yaml rbac_rules)",
+            "# ---------------------------------------------------------------------------",
+            "",
+        ]
+        for role in cs.rbac_rules.roles:
+            lines.append(f"# Role: {role.name}")
+            if role.limits:
+                tl = role.limits
+                allow_below = tl.get("allow_below")
+                review_below = tl.get("manual_review_below")
+                role_action = role.action or (
+                    role.allowed_actions[0] if role.allowed_actions else "action"
+                )
+                subj_field = role.subject_field
+                mag_field = role.magnitude_field
+                deny_field = role.denylist_field
+                denylist = []
+                if role.restrictions:
+                    for r in role.restrictions:
+                        denylist.extend(r.get("denylist", []))
+
+                if allow_below:
+                    lines.append(f"rbac_allow_{role.name}_trade if {{")
+                    lines.append(f'    input.action == "{role_action}"')
+                    lines.append(f'    lower(input.{subj_field}) == "{role.name}"')
+                    lines.append(f"    input.{mag_field} <= {allow_below}")
+                    for c in denylist:
+                        lines.append(f'    input.{deny_field} != "{c}"')
+                    lines.append("}")
+                    lines.append("")
+
+                if review_below and allow_below:
+                    lines.append(f"rbac_review_{role.name}_trade if {{")
+                    lines.append(f'    input.action == "{role_action}"')
+                    lines.append(f'    lower(input.{subj_field}) == "{role.name}"')
+                    lines.append(f"    input.{mag_field} > {allow_below}")
+                    lines.append(f"    input.{mag_field} <= {review_below}")
+                    for c in denylist:
+                        lines.append(f'    input.{deny_field} != "{c}"')
+                    lines.append("}")
+                    lines.append("")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# NeMo Colang generator
+# ---------------------------------------------------------------------------
+
+
+def generate_nemo(cs: ControlStructureModel) -> str:
+    """Generate NeMo Guardrails Colang 2.x rail definitions."""
+    lines: list[str] = [
+        _banner(),
+        f"# System: {cs.system.name} v{cs.system.version}",
+        "#",
+        "# NeMo Guardrails Colang 2.x rails generated from STPA UCAs.",
+        "# These rails guard LLM-level unsafe outputs and prompt injection.",
+        "#",
+        "",
+    ]
+
+    nemo_ucas = [
+        u
+        for u in cs.unsafe_control_actions
+        if "nemo" in u.enforcement or "all" in u.enforcement
+    ]
+
+    if not nemo_ucas:
+        lines.append("# No NeMo rails defined for any UCA in this control structure.")
+        return "\n".join(lines)
+
+    # Action declarations
+    lines += [
+        "# ---------------------------------------------------------------------------",
+        "# Action declarations",
+        "# ---------------------------------------------------------------------------",
+        "",
+        "action MaskPIIAction",
+        "action LogSafetyAuditAction",
+        "",
+    ]
+    for uca in nemo_ucas:
+        assert uca.nemo_rail is not None
+        flow = uca.nemo_rail.flow_name
+        lines.append(f"action {_pascal(flow)}CheckAction  # {uca.id}")
+    lines.append("")
+
+    # Flow definitions
+    lines += [
+        "# ---------------------------------------------------------------------------",
+        "# Safety flows",
+        "# ---------------------------------------------------------------------------",
+        "",
+    ]
+    for uca in nemo_ucas:
+        assert uca.nemo_rail is not None
+        rail = uca.nemo_rail
+        lines += [
+            f"# {uca.id}: {uca.description}",
+            f"flow {rail.flow_name}",
+            f'  bot say "{rail.message}"',
+            "  await LogSafetyAuditAction",
+            "",
+        ]
+
+    # Main output guardrail that chains all safety flows.
+    # NOTE: `match bot said` is invalid Colang 2.x syntax — `match` only works
+    # with user intent patterns.  This flow is registered as an output rail via
+    # config/rails/config.yml and called by the NeMo runtime automatically; it
+    # must NOT contain a `match` trigger statement.
+    lines += [
+        "# ---------------------------------------------------------------------------",
+        "# Composite output guardrail — invoked on every bot response",
+        "# ---------------------------------------------------------------------------",
+        "",
+        "flow stpa_output_guardrail",
+    ]
+    has_output_checks = False
+    for uca in nemo_ucas:
+        assert uca.nemo_rail is not None
+        cond = uca.condition
+        flow = uca.nemo_rail.flow_name
+        if cond.semantic_pattern:
+            has_output_checks = True
+            lines.append(f"  # Pattern: {cond.semantic_pattern}")
+            lines.append(
+                f"  await {_pascal(flow)}CheckAction as $check_{uca.id.lower().replace('-', '_')}"
+            )
+            lines.append(
+                f"  if $check_{uca.id.lower().replace('-', '_')}.detected == True"
+            )
+            lines.append(f"    await {flow}")
+            lines.append("")
+    if not has_output_checks:
+        lines.append("  return")
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+def _pascal(snake: str) -> str:
+    """Convert snake_case to PascalCase."""
+    return "".join(w.capitalize() for w in snake.split("_"))
+
+
+# ---------------------------------------------------------------------------
+# Python validator generator
+# ---------------------------------------------------------------------------
+
+
+def _qualify_threshold_ref(ref: str, domain: str) -> str:
+    """Prefix domain-scoped threshold_ref with 'domains.<domain>.' when applicable."""
+    if not ref or ref.startswith("domains.") or not domain or domain == "core":
+        return ref
+    return f"domains.{domain}.{ref}"
+
+
+def _composite_parts(composite: str) -> tuple[str, str, str]:
+    """Split a validated composite into ``(lhs_param, threshold_ref, rhs_param)``."""
+    m = _COMPOSITE_SCALED_THRESHOLD_RE.match(composite.strip())
+    if m is None:  # unreachable: ConditionModel refuses any other form
+        raise ValueError(
+            f"composite condition outside the compiled grammar: {composite!r}"
+        )
+    return m.group(1), m.group(2), m.group(3)
+
+
+def generate_python(cs: ControlStructureModel) -> str:
+    """Generate a Python UcaRule module and STPAValidator subclass from the control structure."""
+    py_ucas = [
+        u
+        for u in cs.unsafe_control_actions
+        if "python" in u.enforcement or "all" in u.enforcement
+    ]
+
+    method_bodies: list[str] = []
+    dispatch_lines: list[str] = []
+    eval_functions: list[str] = []
+    uca_rule_entries: list[str] = []
+
+    if not py_ucas:
+        dispatch_lines.append("        pass")
+
+    for uca in py_ucas:
+        cond = uca.condition
+        slug = uca.id.lower().replace("-", "_")
+        method_name = f"_check_{slug}"
+        eval_fn_name = f"_eval_{slug}"
+        uca_code = f"STPA_UCA_{uca.id.replace('-', '_')}"
+        dispatch_lines.append(
+            f"        _v = self.{method_name}(action_name, params)\n"
+            f"        if _v: violations.append(_v)"
+        )
+        eval_functions.append(
+            f"def {eval_fn_name}(params: dict[str, Any]) -> Violation | None:\n"
+            f'    return _DEFAULT_VALIDATOR.{method_name}("{uca.action}", params)\n'
+        )
+        uca_rule_entries.append(
+            "    UcaRule(\n"
+            f'        uca_id="{uca.id}",\n'
+            f'        action_name="{uca.action}",\n'
+            f'        description="{uca.description}",\n'
+            f"        predicate={eval_fn_name},\n"
+            "    ),"
+        )
+
+        body_lines: list[str] = [
+            f"    def {method_name}(self, action_name: str, params: dict[str, Any]) -> Violation | None:",
+            f'        """{uca.id}: {uca.description}"""',
+            "        try:",
+        ]
+
+        if uca.action != "*":
+            body_lines.append(f'            if action_name != "{uca.action}":')
+            body_lines.append("                return None")
+
+        if cond.applies_when:
+            scope_param = cond.applies_when.param
+            scope_value = cond.applies_when.equals.lower()
+            body_lines += [
+                f'            scope_val = params.get("{scope_param}")',
+                f'            if not (isinstance(scope_val, str) and scope_val.strip().lower() == "{scope_value}"):',
+                "                return None",
+            ]
+
+        param = cond.param
+        op = cond.operator
+
+        if param and op == "is_null":
+            body_lines += [
+                f'            if params.get("{param}") is None:',
+                "                return Violation(",
+                '                    tier="stpa",',
+                f'                    code="{uca_code}",',
+                f'                    message="{uca.description}",',
+                "                    kind=ViolationKind.HARD,",
+                "                )",
+            ]
+        elif param and op == "is_false":
+            body_lines += [
+                f'            if params.get("{param}") is False:',
+                "                return Violation(",
+                '                    tier="stpa",',
+                f'                    code="{uca_code}",',
+                f'                    message="{uca.description}",',
+                "                    kind=ViolationKind.HARD,",
+                "                )",
+            ]
+        elif param and op == "is_true":
+            body_lines += [
+                f'            if params.get("{param}") is True:',
+                "                return Violation(",
+                '                    tier="stpa",',
+                f'                    code="{uca_code}",',
+                f'                    message="{uca.description}",',
+                "                    kind=ViolationKind.HARD,",
+                "                )",
+            ]
+        elif param and op == "greater_than" and cond.threshold_ref:
+            attr_path = _qualify_threshold_ref(cond.threshold_ref, cs.system.domain)
+            all_keys = [param, *cond.param_aliases]
+            norm_keys = set(cond.normalize_fraction_aliases)
+            if len(all_keys) == 1 and not norm_keys:
+                body_lines += [
+                    f'            threshold = _resolve_threshold("{attr_path}")',
+                    f'            val = params.get("{param}")',
+                    "            if val is None:",
+                    f'                logger.warning("{uca.id}: missing param `{param}` — failing closed.")',
+                    "                return Violation(",
+                    '                    tier="stpa",',
+                    f'                    code="{uca_code}",',
+                    f'                    message="Missing required param `{param}`.",',
+                    "                    kind=ViolationKind.HARD,",
+                    "                )",
+                    "            f_val = float(val)",
+                    "            if not math.isfinite(f_val):",
+                    "                return Violation(",
+                    '                    tier="stpa",',
+                    f'                    code="{uca_code}",',
+                    f'                    message="Non-finite param `{param}`.",',
+                    "                    kind=ViolationKind.HARD,",
+                    "                )",
+                    "            if f_val > threshold:",
+                    "                return Violation(",
+                    '                    tier="stpa",',
+                    f'                    code="{uca_code}",',
+                    f'                    message=f"{uca.description} ({{f_val:.4f}} > {{threshold}})",',
+                    "                    kind=ViolationKind.HARD,",
+                    "                )",
+                ]
+            else:
+                keys_tuple_str = "(" + ", ".join(f'"{k}"' for k in all_keys) + ")"
+                norm_tuple_str = (
+                    "("
+                    + ", ".join(f'"{k}"' for k in cond.normalize_fraction_aliases)
+                    + ",)"
+                    if cond.normalize_fraction_aliases
+                    else "()"
+                )
+                body_lines += [
+                    f'            threshold = _resolve_threshold("{attr_path}")',
+                    f"            candidates = [(k, params.get(k)) for k in {keys_tuple_str} if params.get(k) is not None]",
+                    "            if not candidates:",
+                    f'                logger.warning("{uca.id}: missing param `{param}` — failing closed.")',
+                    "                return Violation(",
+                    '                    tier="stpa",',
+                    f'                    code="{uca_code}",',
+                    f'                    message="Missing required param `{param}`.",',
+                    "                    kind=ViolationKind.HARD,",
+                    "                )",
+                    "            for key_name, raw_val in candidates:",
+                    "                if isinstance(raw_val, bool) or not isinstance(raw_val, (int, float, str)):",
+                    "                    return Violation(",
+                    '                        tier="stpa",',
+                    f'                        code="{uca_code}",',
+                    '                        message=f"Invalid non-numeric param `{key_name}`.",',
+                    "                        kind=ViolationKind.HARD,",
+                    "                    )",
+                    "                f_val = float(raw_val)",
+                    "                if not math.isfinite(f_val):",
+                    "                    return Violation(",
+                    '                        tier="stpa",',
+                    f'                        code="{uca_code}",',
+                    '                        message=f"Non-finite param `{key_name}`.",',
+                    "                        kind=ViolationKind.HARD,",
+                    "                    )",
+                    f"                eff_val = f_val * 100.0 if (key_name in {norm_tuple_str} and 0.0 < f_val <= 1.0) else f_val",
+                    "                if eff_val > threshold:",
+                    "                    return Violation(",
+                    '                        tier="stpa",',
+                    f'                        code="{uca_code}",',
+                    f'                        message=f"{uca.description} ({{eff_val:.4f}} > {{threshold}})",',
+                    "                        kind=ViolationKind.HARD,",
+                    "                    )",
+                ]
+        elif param and op == "greater_than" and cond.threshold is not None:
+            body_lines += [
+                f'            val = params.get("{param}")',
+                "            if val is not None:",
+                "                if isinstance(val, bool):",
+                "                    return Violation(",
+                '                        tier="stpa",',
+                f'                        code="{uca_code}",',
+                f'                        message="Boolean param `{param}` is not a valid numeric value.",',
+                "                        kind=ViolationKind.HARD,",
+                "                    )",
+                "                f_val = float(val)",
+                "                if not math.isfinite(f_val):",
+                "                    return Violation(",
+                '                        tier="stpa",',
+                f'                        code="{uca_code}",',
+                f'                        message="Non-finite param `{param}`.",',
+                "                        kind=ViolationKind.HARD,",
+                "                    )",
+                f"                if f_val > {cond.threshold}:",
+                "                    return Violation(",
+                '                        tier="stpa",',
+                f'                        code="{uca_code}",',
+                f'                        message="{uca.description}",',
+                "                        kind=ViolationKind.HARD,",
+                "                    )",
+            ]
+        elif param and op == "less_than" and cond.threshold_ref:
+            attr_path = _qualify_threshold_ref(cond.threshold_ref, cs.system.domain)
+            body_lines += [
+                f'            threshold = _resolve_threshold("{attr_path}")',
+                f'            val = params.get("{param}")',
+                "            if val is None:",
+                f'                logger.warning("{uca.id}: missing param `{param}` — failing closed.")',
+                "                return Violation(",
+                '                    tier="stpa",',
+                f'                    code="{uca_code}",',
+                f'                    message="Missing required param `{param}`.",',
+                "                    kind=ViolationKind.HARD,",
+                "                )",
+                "            f_val = float(val)",
+                "            if not math.isfinite(f_val):",
+                "                return Violation(",
+                '                    tier="stpa",',
+                f'                    code="{uca_code}",',
+                f'                    message="Non-finite param `{param}`.",',
+                "                    kind=ViolationKind.HARD,",
+                "                )",
+                "            if f_val < threshold:",
+                "                return Violation(",
+                '                    tier="stpa",',
+                f'                    code="{uca_code}",',
+                f'                    message=f"{uca.description} ({{f_val:.4f}} < {{threshold}})",',
+                "                    kind=ViolationKind.HARD,",
+                "                )",
+            ]
+        elif param and op == "less_than" and cond.threshold is not None:
+            body_lines += [
+                f'            val = params.get("{param}")',
+                "            if val is not None:",
+                "                if isinstance(val, bool):",
+                "                    return Violation(",
+                '                        tier="stpa",',
+                f'                        code="{uca_code}",',
+                f'                        message="Boolean param `{param}` is not a valid numeric value.",',
+                "                        kind=ViolationKind.HARD,",
+                "                    )",
+                "                f_val = float(val)",
+                "                if not math.isfinite(f_val):",
+                "                    return Violation(",
+                '                        tier="stpa",',
+                f'                        code="{uca_code}",',
+                f'                        message="Non-finite param `{param}`.",',
+                "                        kind=ViolationKind.HARD,",
+                "                    )",
+                f"                if f_val < {cond.threshold}:",
+                "                    return Violation(",
+                '                        tier="stpa",',
+                f'                        code="{uca_code}",',
+                f'                        message="{uca.description}",',
+                "                        kind=ViolationKind.HARD,",
+                "                    )",
+            ]
+        elif cond.composite:
+            lhs_param, raw_thresh_ref, rhs_param = _composite_parts(cond.composite)
+            thresh_ref = _qualify_threshold_ref(raw_thresh_ref, cs.system.domain)
+            missing_check = (
+                "            if lhs_val is None or rhs_val is None:"
+                if cond.require_params
+                else "            if (lhs_val is None) != (rhs_val is None):"
+            )
+            missing_message = (
+                f"Missing required composite param `{lhs_param}` / `{rhs_param}`."
+                if cond.require_params
+                else f"Incomplete composite params `{lhs_param}` / `{rhs_param}`."
+            )
+            body_lines += [
+                f"            # Composite condition: {cond.composite}",
+                f'            lhs_val = params.get("{lhs_param}")',
+                f'            rhs_val = params.get("{rhs_param}")',
+                missing_check,
+                "                return Violation(",
+                '                    tier="stpa",',
+                f'                    code="{uca_code}",',
+                f'                    message="{missing_message}",',
+                "                    kind=ViolationKind.HARD,",
+                "                )",
+                "            if lhs_val is not None and rhs_val is not None:",
+                "                if any(isinstance(v, bool) or not isinstance(v, (int, float, str)) for v in (lhs_val, rhs_val)):",
+                "                    return Violation(",
+                '                        tier="stpa",',
+                f'                        code="{uca_code}",',
+                f'                        message="Invalid non-numeric composite param `{lhs_param}` or `{rhs_param}`.",',
+                "                        kind=ViolationKind.HARD,",
+                "                    )",
+                "                f_lhs = float(lhs_val)",
+                "                f_rhs = float(rhs_val)",
+                "                if not (math.isfinite(f_lhs) and math.isfinite(f_rhs)):",
+                "                    return Violation(",
+                '                        tier="stpa",',
+                f'                        code="{uca_code}",',
+                f'                        message="Non-finite composite param `{lhs_param}` or `{rhs_param}`.",',
+                "                        kind=ViolationKind.HARD,",
+                "                    )",
+                f'                if f_lhs < 0 or f_rhs < 0 or f_lhs > _resolve_threshold("{thresh_ref}") * f_rhs:',
+                "                    return Violation(",
+                '                        tier="stpa",',
+                f'                        code="{uca_code}",',
+                f'                        message="{uca.description}",',
+                "                        kind=ViolationKind.HARD,",
+                "                    )",
+            ]
+
+        body_lines += [
+            "            return None",
+            "        except Exception as exc:",
+            f'            logger.error("Error evaluating {uca.id}: %s", exc)',
+            "            return Violation(",
+            '                tier="stpa",',
+            f'                code="{uca_code}",',
+            '                message=f"Evaluation error — failing closed ({exc}).",',
+            "                kind=ViolationKind.HARD,",
+            "            )",
+            "",
+        ]
+        method_bodies.append("\n".join(body_lines))
+
+    dispatch_str = "\n".join(dispatch_lines)
+    methods_str = "\n".join(method_bodies)
+    eval_fns_str = "\n\n".join(eval_functions)
+    uca_rules_str = "\n".join(uca_rule_entries)
+    domain_alias = f"{cs.system.domain.capitalize()}STPAValidator"
+
+    return f'''\
+{_banner()}# System: {cs.system.name} v{cs.system.version}
+#
+# Generated Python STPA UCA rules and validator.
+#
+# All threshold references are resolved from the THRESHOLDS singleton
+# (config/governance_thresholds.json).
+
+from __future__ import annotations
+
+import logging
+import math
+from typing import Any
+
+from src.gateway.governance.contracts import Violation, ViolationKind
+from src.gateway.governance.schemas.thresholds import THRESHOLDS
+from src.gateway.governance.stpa_validator import STPAValidator, UcaRule
+
+logger = logging.getLogger("Gateway.Governance.GeneratedSTPAValidator")
+
+
+def _resolve_threshold(path: str) -> float:
+    """Resolve a dot-separated threshold path via THRESHOLDS.resolve(path)."""
+    try:
+        resolved = THRESHOLDS.resolve(path)
+        if isinstance(resolved, (int, float)):
+            return float(resolved)
+    except Exception:
+        pass
+    obj: Any = THRESHOLDS
+    parts = path.split(".")[2:] if path.startswith("domains.") else path.split(".")
+    for part in parts:
+        obj = getattr(obj, part)
+    return float(obj)
+
+
+class GeneratedSTPAValidator(STPAValidator):
+    """
+    Auto-generated STPA validator for {cs.system.name}.
+
+    Do NOT edit this file; re-run the compiler instead:
+        python -m src.gateway.governance.stpa_compiler compile
+    """
+
+    def validate(self, action_name: str, params: dict[str, Any]) -> list[Violation]:
+        """Public entry-point — evaluates core STPA rules and generated UCA checks."""
+        violations = list(super().validate(action_name, params))
+        seen_codes = {{v.code for v in violations}}
+        for v in self.validate_generated(action_name, params):
+            if v.code not in seen_codes:
+                violations.append(v)
+        return violations
+
+    def validate_generated(self, action_name: str, params: dict[str, Any]) -> list[Violation]:
+        """Run all generated UCA checks. Returns list of Violation objects."""
+        violations: list[Violation] = []
+{dispatch_str}
+        return violations
+
+{methods_str}
+
+_DEFAULT_VALIDATOR = GeneratedSTPAValidator()
+
+
+{eval_fns_str}
+
+
+UCA_RULES: tuple[UcaRule, ...] = (
+{uca_rules_str}
+)
+
+{domain_alias} = GeneratedSTPAValidator
+'''
+
+
+# ---------------------------------------------------------------------------
+# LangGraph Saga generator
+# ---------------------------------------------------------------------------
+
+
+def generate_langgraph(cs: ControlStructureModel) -> str:
+    """Generate LangGraph Saga compensating sub-graphs from UCA definitions.
+
+    For each UCA with enforcement=[langgraph] this emits:
+
+    1. A *forward wrapper node* that implements the Write-Ahead Log (WAL) pattern:
+       - Step 1: Append a PENDING intent to ``state["completed_transactions"]``.
+       - Step 2: Execute the external action.
+       - Step 3: Update the ledger entry to COMPLETED.
+
+    2. A *compensating node* that is strictly idempotent via an ``idempotency_key``.
+       It reads the ledger, extracts context via the ``parameter_mapping``, and
+       calls the reverse API.
+
+    3. A centralized *saga_router_node* that:
+       - Detects PENDING entries (ghost-state crash recovery) and escalates to
+         human_review until an automated reconciliation API is registered.
+       - Traverses COMPLETED entries in LIFO order and routes to the appropriate
+         compensating node.
+       - Routes to ``human_review`` if a compensating node itself fails.
+    """
+    saga_ucas = [u for u in cs.unsafe_control_actions if "langgraph" in u.enforcement]
+
+    if not saga_ucas:
+        return (
+            f"{_banner()}"
+            "# No UCAs with enforcement=[langgraph] defined in this control structure.\n"
+        )
+
+    # Determine whether any Saga UCA uses an MCP tool call — controls extra imports.
+    needs_mcp_imports = any(
+        u.langgraph_saga is not None and u.langgraph_saga.execution_type == "mcp_tool"
+        for u in saga_ucas
+    )
+
+    # Build the third-party import block.  isort requires both third-party
+    # imports to be in the same block (no blank line between them).
+    thirdparty_import_lines: list[str] = [
+        "from src.gateway.governance.saga_compensator import FunctionSagaCompensator",
+    ]
+    if needs_mcp_imports:
+        thirdparty_import_lines.append(
+            "from src.gateway.infrastructure.mcp_client import GatewayMCPClient"
+        )
+    thirdparty_import_lines.extend(
+        [
+            "",
+            "AgentState = Any",
+            "LedgerEntry = dict[str, Any]",
+        ]
+    )
+    mcp_singleton_lines: list[str] = []
+    if needs_mcp_imports:
+        mcp_singleton_lines = [
+            "",
+            "# [CTRL_WAL_002] module-level MCP client singleton for WAL forward nodes.",
+            "# The singleton is re-used across Saga invocations to avoid connection churn.",
+            "_mcp_client: GatewayMCPClient | None = None",
+            "",
+            "",
+            "def _get_mcp_client() -> GatewayMCPClient:",
+            "    global _mcp_client",
+            "    if _mcp_client is None:",
+            "        _mcp_client = GatewayMCPClient()",
+            "    return _mcp_client",
+            "",
+            "",
+        ]
+
+    # asyncio is stdlib — include it in the stdlib block only when needed.
+    # isort requires all stdlib imports to be together before third-party imports.
+    stdlib_imports: list[str] = (
+        [
+            "import asyncio",
+            "import concurrent.futures",
+            "import datetime",
+            "import hashlib",
+            "import logging",
+            "from collections.abc import Coroutine, Generator",
+            "from typing import Any",
+        ]
+        if needs_mcp_imports
+        else [
+            "import datetime",
+            "import hashlib",
+            "import logging",
+            "from collections.abc import Generator",
+            "from typing import Any",
+        ]
+    )
+
+    run_async_helper_lines: list[str] = (
+        [
+            "def _run_async(coro: Coroutine[Any, Any, dict[str, Any]]) -> dict[str, Any]:",
+            '    """Run an async coroutine from a synchronous WAL generator node."""',
+            "    try:",
+            "        return asyncio.get_event_loop().run_until_complete(coro)",
+            "    except RuntimeError:",
+            "        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:",
+            "            return pool.submit(asyncio.run, coro).result()",
+            "",
+            "",
+        ]
+        if needs_mcp_imports
+        else []
+    )
+
+    lines: list[str] = [
+        _banner(),
+        f"# System: {cs.system.name} v{cs.system.version}",
+        "#",
+        "# LangGraph Saga compensating sub-graphs generated from STPA UCAs.",
+        "# Each forward node implements Write-Ahead Logging (WAL) to prevent",
+        "# ghost state after mid-transaction crashes.  Each compensating node",
+        "# is strictly idempotent via a derived idempotency_key.",
+        "#",
+        "# [CTRL_WAL_002] Compliance Note:",
+        "#   Forward nodes with execution_type=mcp_tool emit a real async MCP tool",
+        "#   invocation (via GatewayMCPClient) instead of a stub placeholder.  This",
+        "#   satisfies the CTRL_WAL_002 requirement for atomic transaction guarantees",
+        "#   to be provable in production, not merely declared in policy documents.",
+        "#   See config/control_mappings.json for the active regulatory framework.",
+        "# DO NOT EDIT -- regenerate with:",
+        "#   python -m src.gateway.governance.stpa_compiler compile --targets langgraph",
+        "",
+        "from __future__ import annotations",
+        "",
+        *stdlib_imports,
+        "",
+        *thirdparty_import_lines,
+        *mcp_singleton_lines,
+        'logger = logging.getLogger("Gateway.Governance.GeneratedSagaNodes")',
+        "",
+        "",
+        "# ---------------------------------------------------------------------------",
+        "# Helpers",
+        "# ---------------------------------------------------------------------------",
+        "",
+        "def _derive_idempotency_key(transaction_id: str, action: str) -> str:",
+        '    """Deterministically derive an idempotency key for a compensating action."""',
+        '    raw = f"{transaction_id}:{action}"',
+        "    return hashlib.sha256(raw.encode()).hexdigest()[:32]",
+        "",
+        "",
+        "def _utcnow() -> str:",
+        "    return datetime.datetime.now(datetime.timezone.utc).isoformat()",
+        "",
+        "",
+        "def _next_sequence_id(state: AgentState) -> int:",
+        '    """Return the next monotonically increasing sequence_id for the ledger."""',
+        '    txns = state.get("completed_transactions") or []',
+        '    return (max(t["sequence_id"] for t in txns) + 1) if txns else 0',
+        "",
+        "",
+        *run_async_helper_lines,
+    ]
+
+    # -----------------------------------------------------------------------
+    # Forward nodes (WAL pattern) + Compensating nodes (idempotent)
+    # -----------------------------------------------------------------------
+    router_cases: list[tuple[str, str, str]] = []
+    compensator_vars: list[str] = []
+
+    for uca in saga_ucas:
+        assert uca.langgraph_saga is not None  # validated by Pydantic
+        saga = uca.langgraph_saga
+        uca_id = uca.id
+        uca_slug = uca_id.lower().replace("-", "_")
+        fwd_fn = f"forward_{saga.forward_action}_node_{uca_slug}"
+        comp_fn = f"compensate_{saga.compensating_action}_node_{uca_slug}"
+        comp_var = f"{saga.compensating_action}_compensator"
+        compensator_vars.append(comp_var)
+
+        # Build context extraction lines from parameter_mapping.
+        # Variables are prefixed with "_" so ruff F841 does not flag them as
+        # unused — they are intentionally extracted for the implementor's
+        # reference and used in the commented-out reverse API call below.
+        mapping_lines = [
+            f'    _{pm.compensating_key} = context_data.get("{pm.forward_key}")'
+            for pm in saga.parameter_mapping
+        ] or ["    pass  # no parameter_mapping defined"]
+        comp_kwarg_lines = [
+            f"        #     {pm.compensating_key}=_{pm.compensating_key},"
+            for pm in saga.parameter_mapping
+        ]
+        mapping_str = "\n".join(mapping_lines)
+        comp_kwargs_str = "\n".join(comp_kwarg_lines)
+
+        # ---- Forward WAL node -------------------------------------------------
+        # [CTRL_WAL_002] emit a real execution block based on execution_type.
+        # execution_type=mcp_tool → async GatewayMCPClient.call_tool() call
+        # execution_type=local    → retains a clearly-labeled local stub that
+        #                           the implementor must wire before promotion.
+        if saga.execution_type == "mcp_tool":
+            req_keys = [
+                str(p["name"] if isinstance(p, dict) else p.name)
+                for ca in cs.control_actions
+                if (ca.get("name") if isinstance(ca, dict) else ca.name)
+                == saga.forward_action
+                for p in (ca.get("params", []) if isinstance(ca, dict) else ca.params)
+                if (
+                    p.get("required")
+                    if isinstance(p, dict)
+                    else getattr(p, "required", False)
+                )
+            ]
+            map_keys = [
+                pm.forward_key
+                for pm in saga.parameter_mapping
+                if pm.forward_key != "transaction_id" and pm.forward_key not in req_keys
+            ]
+            fwd_keys = (
+                (*req_keys[:-1], *map_keys, req_keys[-1], "approval_token")
+                if req_keys
+                else (*map_keys, "approval_token")
+            )
+            keys_tuple_src = "(" + ", ".join(f'"{k}"' for k in fwd_keys) + ")"
+            step2_lines = [
+                "    # Step 2: [CTRL_WAL_002] — real async MCP tool invocation.",
+                "    # GatewayMCPClient traverses the full 7-layer governance pipeline",
+                "    # (Aho-Corasick → NeMo → STPA → OPA → CBF → Consensus → DoWhy)",
+                "    # before executing the action, ensuring atomicity guarantees are",
+                "    # proven in production and not merely declared in policy documents.",
+                "    result: dict[str, Any] = _run_async(",
+                "        _get_mcp_client().call_tool(",
+                f'            name="{saga.mcp_tool_name}",',
+                "            arguments={",
+                "                k: v",
+                "                for k, v in state.items()",
+                "                if k",
+                f"                in {keys_tuple_src}",
+                "            },",
+                "        )",
+                "    )",
+            ]
+        else:
+            step2_lines = [
+                "    # Step 2: LOCAL stub — wire to a real implementation before promoting",
+                "    # to production.  See execution_type field in stpa_control_structure.yaml.",
+                "    # To use MCP: set execution_type: mcp_tool + mcp_tool_name in the YAML",
+                "    # and regenerate with: python -m src.gateway.governance.stpa_compiler compile",
+                "    result: dict[str, Any] = {}  # STUB: replace before production",
+            ]
+
+        lines += [
+            f"# --- {uca_id}: {uca.description} ---",
+            f"# [CTRL_WAL_002] execution_type: {saga.execution_type}"
+            + (f" | mcp_tool_name: {saga.mcp_tool_name}" if saga.mcp_tool_name else ""),
+            "",
+            f"def {fwd_fn}(state: AgentState) -> Generator[dict[str, Any], None, dict[str, Any]]:",
+            f'    """WAL forward node for {uca_id} ({saga.forward_action}).',
+            "    ",
+            "    Step 1: Write PENDING intent to ledger (yielded to checkpointer).",
+            f"    Step 2: Execute via {saga.execution_type} - {saga.mcp_tool_name or 'local stub'}.",
+            "    Step 3: Confirm COMPLETED in the ledger.",
+            "    ",
+            "    This node MUST be wrapped in a try/except by the caller.",
+            "    On exception, the PENDING entry persists so saga_router_node",
+            "    can reconcile ghost state on the next execution.",
+            '    """',
+            "    seq_id = _next_sequence_id(state)",
+            "    intent: LedgerEntry = {",
+            '        "sequence_id": seq_id,',
+            '        "timestamp": _utcnow(),',
+            f'        "uca_ref": "{uca_id}",',
+            f'        "action": "{saga.forward_action}",',
+            '        "idempotency_key": "",  # populated after API call returns tx_id',
+            '        "status": "PENDING",',
+            '        "context_data": {},',
+            "    }",
+            "    # Step 1: Persist WAL intent BEFORE the API call",
+            f'    logger.info("{uca_id}: writing PENDING intent seq_id=%s", seq_id)',
+            '    yield {"completed_transactions": [intent]}',
+            "",
+            *step2_lines,
+            '    tx_id: str = result.get("transaction_id", "")',
+            "",
+            "    # Step 3: Mark COMPLETED",
+            "    confirmed: LedgerEntry = {",
+            '        "sequence_id": seq_id,',
+            '        "timestamp": _utcnow(),',
+            f'        "uca_ref": "{uca_id}",',
+            f'        "action": "{saga.forward_action}",',
+            f'        "idempotency_key": _derive_idempotency_key(tx_id, "{saga.compensating_action}"),',
+            '        "status": "COMPLETED",',
+            '        "context_data": result,',
+            "    }",
+            f'    logger.info("{uca_id}: action COMPLETED tx_id=%s", tx_id)',
+            '    return {"completed_transactions": [confirmed]}',
+            "",
+            "",
+        ]
+
+        # ---- Compensating node (idempotent) -----------------------------------
+        lines += [
+            f"def {comp_fn}(state: AgentState) -> dict[str, Any]:",
+            f'    """Idempotent compensating node for {uca_id} ({saga.compensating_action}).',
+            "    ",
+            f"    Reads the most-recent COMPLETED ledger entry for '{saga.forward_action}'",
+            f"    with uca_ref=={uca_id!r}, extracts parameters via parameter_mapping,",
+            "    and calls the reverse API.",
+            "    The idempotency_key prevents double-refunds across LangGraph retries.",
+            '    """',
+            '    txns = state.get("completed_transactions") or []',
+            "    target = next(",
+            "        (",
+            "            t for t in reversed(txns)",
+            f'            if t["uca_ref"] == "{uca_id}"',
+            f'            and t["action"] == "{saga.forward_action}"',
+            '            and t["status"] == "COMPLETED"',
+            "        ),",
+            "        None,",
+            "    )",
+            "    if target is None:",
+            f'        logger.warning("{uca_id}: no COMPLETED ledger entry — nothing to compensate.")',
+            '        return {"safety_status": "ESCALATED"}',
+            "",
+            '    context_data = target["context_data"]',
+            '    idempotency_key = target["idempotency_key"]',
+            "",
+            "    # Extract parameters via parameter_mapping",
+            mapping_str,
+            "",
+            "    try:",
+            "        # Replace with real reverse API call, e.g.:",
+            f"        # gateway_api.{saga.compensating_action}(",
+            "        #     idempotency_key=idempotency_key,",
+            comp_kwargs_str,
+            "        # )",
+            f"        logger.info(\"{uca_id}: '{saga.compensating_action}' executed. key=%s\", idempotency_key)",
+            "        rollback_entry: LedgerEntry = dict(target)  # type: ignore[assignment]",
+            '        rollback_entry["status"] = "ROLLED_BACK"',
+            '        rollback_entry["timestamp"] = _utcnow()',
+            "        return {",
+            '            "completed_transactions": [rollback_entry],',
+            '            "safety_status": "BLOCKED",',
+            "        }",
+            "    except Exception as exc:",
+            f'        logger.error("{uca_id}: compensating action FAILED key=%s err=%s", idempotency_key, exc)',
+            "        partial_entry: LedgerEntry = dict(target)  # type: ignore[assignment]",
+            '        partial_entry["status"] = "PARTIAL_FAILURE"',
+            '        partial_entry["timestamp"] = _utcnow()',
+            "        return {",
+            '            "completed_transactions": [partial_entry],',
+            '            "safety_status": "ESCALATED",',
+            '            "next_step": "human_review",',
+            "        }",
+            "",
+            "",
+            f"{comp_var} = FunctionSagaCompensator(",
+            f'    action_name="{saga.forward_action}",',
+            f'    uca_id="{uca_id}",',
+            f'    compensating_action="{saga.compensating_action}",',
+            f"    compensate_fn={comp_fn},",
+            ")",
+            "",
+            "",
+        ]
+
+        router_cases.append((uca_id, saga.forward_action, comp_fn))
+
+    # -----------------------------------------------------------------------
+    # Centralized Saga Router Node
+    # -----------------------------------------------------------------------
+    lines += [
+        "# ---------------------------------------------------------------------------",
+        "# Centralized Saga Router Node",
+        "# ---------------------------------------------------------------------------",
+        "",
+        "def saga_router_node(state: AgentState) -> dict[str, Any]:",
+        '    """Deterministic LIFO rollback router for all Saga compensating nodes.',
+        "    ",
+        "    1. Ghost-state recovery: escalates to human_review on PENDING entries.",
+        "    2. LIFO rollback: traverses COMPLETED entries in reverse sequence_id order",
+        "       and delegates to the appropriate compensating node function.",
+        "    3. Unhandled UCA escalation: escalates if no compensating node is registered.",
+        '    """',
+        "    txns = sorted(",
+        '        state.get("completed_transactions") or [],',
+        '        key=lambda t: t["sequence_id"],',
+        "        reverse=True,",
+        "    )",
+        "",
+        "    # Ghost-state reconciliation",
+        '    pending = [t for t in txns if t["status"] == "PENDING"]',
+        "    if pending:",
+        "        logger.warning(",
+        '            "saga_router: %d PENDING entries detected — possible ghost state crash.",',
+        "            len(pending),",
+        "        )",
+        "        return {",
+        '            "safety_status": "ESCALATED",',
+        '            "next_step": "human_review",',
+        '            "governance_summary": (',
+        '                f"Saga Router: ghost state detected ({len(pending)} PENDING entries). "',
+        '                "Manual reconciliation required."',
+        "            ),",
+        "        }",
+        "",
+        "    # LIFO rollback routing",
+        '    rollback_targets = [t for t in txns if t["status"] == "COMPLETED"]',
+        "    if not rollback_targets:",
+        '        logger.info("saga_router: no COMPLETED entries to roll back.")',
+        '        return {"safety_status": "BLOCKED"}',
+        "",
+        "    next_target = rollback_targets[0]",
+        '    uca_ref = next_target["uca_ref"]',
+        '    action = next_target["action"]',
+        "",
+    ]
+
+    for uca_id, fwd_action, comp_fn in router_cases:
+        lines += [
+            f'    if uca_ref == "{uca_id}" and action == "{fwd_action}":',
+            f'        logger.info("saga_router: delegating to {comp_fn} seq_id=%s", next_target["sequence_id"])',
+            f"        return {comp_fn}(state)",
+            "",
+        ]
+
+    lines += [
+        "    logger.error(",
+        '        "saga_router: no compensating node for uca_ref=%s action=%s",',
+        "        uca_ref, action,",
+        "    )",
+        "    return {",
+        '        "safety_status": "ESCALATED",',
+        '        "next_step": "human_review",',
+        '        "governance_summary": f"Saga Router: unhandled uca_ref={uca_ref} action={action}.",',
+        "    }",
+        "",
+        "",
+        "SAGA_COMPENSATORS: tuple[FunctionSagaCompensator, ...] = (",
+        *[f"    {var}," for var in compensator_vars],
+        ")",
+        "",
+    ]
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# AGP Semantic Governance Policy generator (C1)
+# ---------------------------------------------------------------------------
+
+
+def generate_agp(cs: ControlStructureModel) -> str:
+    """Generate Google Agent Platform Semantic Governance Policy (SGP) text.
+
+    Emits natural language constraint text following the mapping in
+    ``CAGE_STPA_TO_AGP_SEMANTIC_POLICY_RESEARCH.md §4.1``.
+
+    The output is a plain-text string (not JSON) suitable for the AGP
+    ``Constraints`` field. Maximum 5,000 characters; generator warns and
+    appends a ``# TRUNCATED`` sentinel if the budget is exceeded.
+
+    CBF invariants are intentionally omitted — they are not mappable to
+    AGP natural language constraints.
+
+    Args:
+        cs: Validated ``ControlStructureModel`` instance.
+
+    Returns:
+        Natural language constraint text string.
+    """
+    lines: list[str] = [
+        f"# CAGE Semantic Governance Policy — {cs.system.name} v{cs.system.version}",
+        "# Generated from STPA control structure. Do not edit manually.",
+        "# Source: config/stpa_control_structure.yaml",
+        "",
+    ]
+
+    for uca in cs.unsafe_control_actions:
+        cond = uca.condition
+        action = uca.action
+        param = cond.param or ""
+
+        # Resolve threshold value
+        threshold: str | float | None = None
+        if cond.threshold is not None:
+            threshold = cond.threshold
+        elif cond.threshold_ref:
+            # Attempt runtime resolution via THRESHOLDS singleton
+            try:
+                from src.gateway.governance.schemas.thresholds import THRESHOLDS
+
+                qualified_ref = _qualify_threshold_ref(
+                    cond.threshold_ref, cs.system.domain
+                )
+                try:
+                    threshold = THRESHOLDS.resolve(qualified_ref)
+                except KeyError:
+                    threshold = THRESHOLDS.resolve(cond.threshold_ref)
+            except Exception:
+                threshold = f"<{cond.threshold_ref}>"
+
+        op = cond.operator
+
+        # Map operator → NL sentence
+        if op == "is_null" and param:
+            sentence = f'Do not execute "{action}" if "{param}" is null or missing.'
+        elif op == "is_false" and param:
+            sentence = (
+                f'Do not execute "{action}" if "{param}" is false or not set to true.'
+            )
+        elif op == "is_true" and param:
+            sentence = f'Do not execute "{action}" if "{param}" is true.'
+        elif op == "greater_than" and param and threshold is not None:
+            sentence = f'Do not execute "{action}" if "{param}" exceeds {threshold}.'
+        elif op == "less_than" and param and threshold is not None:
+            sentence = f'Do not execute "{action}" if "{param}" is below {threshold}.'
+        elif op == "equals" and param and threshold is not None:
+            sentence = f'Do not execute "{action}" if "{param}" equals {threshold}.'
+        elif cond.composite:
+            # Composite conditions: emit as a general constraint
+            sentence = f'Do not execute "{action}" when: {cond.composite}.'
+        else:
+            # Cannot map — skip with a comment
+            lines.append(f"# UCA {uca.id}: condition not mappable to AGP NL — omitted.")
+            continue
+
+        if cond.applies_when:
+            sentence = (
+                f'When "{cond.applies_when.param}" is "{cond.applies_when.equals}": '
+                f"{sentence}"
+            )
+        if cond.require_params and cond.composite:
+            lhs, _, rhs = _composite_parts(cond.composite)
+            sentence += f' Also do not execute it if "{lhs}" or "{rhs}" is missing.'
+
+        lines.append(f"# {uca.id}: {uca.description}")
+        lines.append(sentence)
+        lines.append("")
+
+    # NeMo rail messages → "Block any request that ..." sentences
+    for uca in cs.unsafe_control_actions:
+        if uca.nemo_rail:
+            msg = uca.nemo_rail.message
+            lines.append(f"# {uca.id} (NeMo rail): {uca.description}")
+            lines.append(f"Block any request that {msg}")
+            lines.append("")
+
+    # RBAC rules → human approval / deny sentences
+    if cs.rbac_rules:
+        for role in cs.rbac_rules.roles:
+            if role.limits:
+                tl = role.limits
+                review_below = tl.get("manual_review_below")
+                allow_below = tl.get("allow_below")
+                role_action = role.action or (
+                    role.allowed_actions[0] if role.allowed_actions else "action"
+                )
+                mag_field = role.magnitude_field
+                deny_field = role.denylist_field
+                denylist: list[str] = []
+                if role.restrictions:
+                    for r in role.restrictions:
+                        denylist.extend(r.get("denylist", []))
+
+                if review_below and allow_below:
+                    lines.append(
+                        f'Require human approval for "{role_action}" where '
+                        f'"{mag_field}" exceeds {allow_below} for "{role.name}" role users.'
+                    )
+                    lines.append("")
+
+                for item in denylist:
+                    lines.append(
+                        f'Deny "{role_action}" where "{deny_field}" is "{item}" '
+                        f'for "{role.name}" role users.'
+                    )
+                    lines.append("")
+
+    output = "\n".join(lines)
+
+    # Enforce 5,000-character budget
+    if len(output) > _AGP_CHAR_BUDGET:
+        logger.warning(
+            "generate_agp: output exceeds %d-character AGP budget (%d chars). "
+            "Truncating with sentinel.",
+            _AGP_CHAR_BUDGET,
+            len(output),
+        )
+        # Truncate to budget minus sentinel length
+        sentinel = "\n# TRUNCATED — output exceeded 5,000-character AGP budget."
+        truncated = output[: _AGP_CHAR_BUDGET - len(sentinel)]
+        output = truncated + sentinel
+
+    return output
+
+
+# ---------------------------------------------------------------------------
+# FTRA Terminal Registry generator
+# ---------------------------------------------------------------------------
+
+
+def generate_terminal_registry(cs: ControlStructureModel) -> str:
+    """Generate the FTRA terminal classification registry as JSON.
+
+    Emits a JSON object mapping each classified action name to its
+    ``terminal_classification``. An action is classified when a
+    ``control_actions`` entry declares ``terminal_classification`` or when it
+    appears in ``unsafe_control_actions``. A UCA without one counts as
+    ``IRREVERSIBLE_TERMINAL``.
+
+    Fail-closed contract (enforced at runtime by IrreversibilityClassifier):
+      Any action name absent from this registry is treated as
+      ``IRREVERSIBLE_TERMINAL`` by the classifier.  This means that adding a
+      new control action to the YAML without annotating
+      ``terminal_classification`` will cause the FTRA to block any plan that
+      reaches that action — the safe default.
+
+    Actions with multiple UCAs:
+      If the same action is classified more than once (by its control
+      action and/or several UCAs) with *different* values, the most
+      restrictive classification wins (IRREVERSIBLE_TERMINAL > EXTERNALLY_REVERSIBLE > REVERSIBLE >
+      READ_ONLY).  A warning is logged for each conflict.
+
+    Args:
+        cs: Validated ``ControlStructureModel`` instance.
+
+    Returns:
+        JSON string suitable for writing to ``config/ftra/terminal_registry.json``.
+    """
+    import datetime as _dt
+
+    from src.gateway.governance.ftra.models import (
+        CLASSIFICATION_SEVERITY,
+    )
+
+    # Derive string-keyed severity map from the canonical enum-keyed map
+    _SEVERITY_ORDER = {
+        tc.value: severity for tc, severity in CLASSIFICATION_SEVERITY.items()
+    }
+
+    # Collect per-action classifications — most restrictive wins on conflict.
+    action_map: dict[str, str] = {}
+    conflicts: list[str] = []
+
+    declared = [
+        (str(ca["name"]), str(ca["terminal_classification"]))
+        for ca in cs.control_actions
+        if ca.get("terminal_classification") is not None
+    ]
+    from_ucas = [
+        (uca.action, uca.terminal_classification or "IRREVERSIBLE_TERMINAL")
+        for uca in cs.unsafe_control_actions
+    ]
+    for action, classification in declared + from_ucas:
+        if action in action_map:
+            existing = action_map[action]
+            if existing != classification:
+                conflicts.append(
+                    f"action '{action}': conflict between '{existing}' and "
+                    f"'{classification}' — using most restrictive"
+                )
+                # Keep the more restrictive classification
+                if _SEVERITY_ORDER[classification] > _SEVERITY_ORDER[existing]:
+                    action_map[action] = classification
+        else:
+            action_map[action] = classification
+
+    for conflict in conflicts:
+        logger.warning("generate_terminal_registry: %s", conflict)
+
+    now = _dt.datetime.now(_dt.timezone.utc)
+    registry = {
+        "version": "3.0",
+        "domain": cs.system.domain,
+        "serial": 2,
+        "generated_at": now.isoformat(),
+        "issued_at": now.isoformat(),
+        "expires_at": (now + _dt.timedelta(days=365)).isoformat(),
+        "system": cs.system.name,
+        "system_version": cs.system.version,
+        "fail_closed_note": (
+            "Any action absent from this registry is treated as "
+            "IRREVERSIBLE_TERMINAL by IrreversibilityClassifier at runtime."
+        ),
+        "terminals": action_map,
+    }
+
+    import json as _json
+
+    return _json.dumps(registry, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# GEAP Agent Registry manifest generator (Phase C)
+# ---------------------------------------------------------------------------
+
+
+def generate_registry_manifest(cs: ControlStructureModel) -> str:
+    """Generate a GEAP Agent Registry tool authorization manifest as JSON.
+
+    GCP Adaptation: the output is consumed by ``AgentRegistryAdapter.push_tool_authorizations()``
+    to update tool authorization policies in the GEAP Agent Registry.  Cloud-agnostic
+    deployments do not use this artifact.
+
+    Emits a JSON string (not natural language) representing the tool authorization
+    manifest derived from the STPA control structure.
+
+    Output format::
+
+        {
+          "_generated_by": "CAGE stpa_compiler",
+          "_source": "config/stpa_control_structure.yaml",
+          "_generated_at": "2026-07-23T00:00:00Z",
+          "_schema_version": "1.0.0",
+          "tool_authorizations": [
+            {
+              "tool_name": "execute_action",
+              "allowed_roles": ["trader", "senior"],
+              "denied_roles": ["junior"],
+              "uca_refs": ["UCA-1", "UCA-2"],
+              "hazard_refs": ["H-1", "H-2"],
+              "requires_approval_above_usd": 10000
+            }
+          ]
+        }
+
+    Mapping rules:
+    - Each unique ``action`` in ``cs.unsafe_control_actions`` becomes a ``tool_name`` entry.
+    - ``uca_refs``: list of UCA IDs that reference this action.
+    - ``hazard_refs``: union of all ``hazard_refs`` across UCAs for this action.
+    - ``allowed_roles``: from ``cs.rbac_rules.roles`` where the action is in ``allowed_actions``.
+    - ``denied_roles``: roles where the action is NOT in ``allowed_actions``.
+    - ``requires_approval_above_usd``: from ``rbac_rules.roles[].limits.manual_review_below``
+      if present (minimum across all roles that have this limit for the action).
+
+    Args:
+        cs: Validated ``ControlStructureModel`` instance.
+
+    Returns:
+        JSON string suitable for writing to
+        ``config/registry/generated_tool_authorizations.json``.
+    """
+    import datetime as _dt
+    import json as _json
+
+    now_utc = _dt.datetime.now(_dt.timezone.utc).isoformat()
+
+    # ── Step 1: Collect per-action UCA refs and hazard refs ──────────────────
+    action_uca_refs: dict[str, list[str]] = {}
+    action_hazard_refs: dict[str, set[str]] = {}
+
+    for uca in cs.unsafe_control_actions:
+        action = uca.action
+        action_uca_refs.setdefault(action, []).append(uca.id)
+        action_hazard_refs.setdefault(action, set()).update(uca.hazard_refs)
+
+    # ── Step 2: Collect per-action RBAC role membership ──────────────────────
+    # allowed_roles: roles whose allowed_actions list includes this action
+    # denied_roles: roles whose allowed_actions list does NOT include this action
+    action_allowed_roles: dict[str, list[str]] = {}
+    action_denied_roles: dict[str, list[str]] = {}
+    action_approval_threshold: dict[str, float | None] = {}
+
+    if cs.rbac_rules:
+        for action in action_uca_refs:
+            allowed: list[str] = []
+            denied: list[str] = []
+            thresholds: list[float] = []
+
+            for role in cs.rbac_rules.roles:
+                if action in role.allowed_actions:
+                    allowed.append(role.name)
+                    # Collect manual_review_below threshold if present
+                    if role.limits:
+                        review_below = role.limits.get("manual_review_below")
+                        if review_below is not None:
+                            thresholds.append(float(review_below))
+                else:
+                    denied.append(role.name)
+
+            action_allowed_roles[action] = allowed
+            action_denied_roles[action] = denied
+            # Use the minimum threshold across all allowed roles (most restrictive)
+            action_approval_threshold[action] = min(thresholds) if thresholds else None
+
+    # ── Step 3: Build tool_authorizations list ────────────────────────────────
+    tool_authorizations: list[dict] = []
+
+    for action in sorted(action_uca_refs.keys()):
+        entry: dict = {
+            "tool_name": action,
+            "allowed_roles": action_allowed_roles.get(action, []),
+            "denied_roles": action_denied_roles.get(action, []),
+            "uca_refs": action_uca_refs[action],
+            "hazard_refs": sorted(action_hazard_refs.get(action, set())),
+        }
+        threshold = action_approval_threshold.get(action)
+        if threshold is not None:
+            entry["requires_approval_above_usd"] = threshold
+
+        tool_authorizations.append(entry)
+
+    manifest = {
+        "_generated_by": "CAGE stpa_compiler",
+        "_source": "config/stpa_control_structure.yaml",
+        "_generated_at": now_utc,
+        "_schema_version": "1.0.0",
+        "tool_authorizations": tool_authorizations,
+    }
+
+    return _json.dumps(manifest, indent=2)
+
+
+def generate_iap_cel_policies(cs: ControlStructureModel) -> str:
+    """Generate GCP IAM CEL conditions for GEAP ``roles/iap.egressor`` bindings.
+
+    Compiles STPA control action terminal classifications (``READ_ONLY`` vs.
+    mutating) and RBAC role memberships into deterministic IAM Common Expression
+    Language (CEL) expressions compatible with GEAP Agent Gateway egress policy
+    enforcement (`roles/iap.egressor`, `iap.webServiceVersions.egressViaIAP`).
+
+    Output format::
+
+        {
+          "_generated_by": "CAGE stpa_compiler",
+          "_source": "config/stpa_control_structure.yaml",
+          "_generated_at": "2026-07-23T00:00:00Z",
+          "_schema_version": "1.0.0",
+          "role": "roles/iap.egressor",
+          "permission": "iap.webServiceVersions.egressViaIAP",
+          "read_only_tools": ["read_resource"],
+          "mutating_tools": ["mutate_record"],
+          "read_only_cel_expression": "resource.type == \\"networkservices\\" && (destination.mcp.tool.name in [\\"read_resource\\"] || request.headers[\\"mcp-method\\"] in [\\"tools/list\\", \\"prompts/list\\"])",
+          "role_bindings": [
+            {
+              "role_name": "operator",
+              "allowed_tools": ["mutate_record", "read_resource"],
+              "read_only_tools": ["read_resource"],
+              "mutating_tools": ["mutate_record"],
+              "cel_expression": "resource.type == \\"networkservices\\" && destination.mcp.tool.name in [\\"mutate_record\\", \\"read_resource\\"]"
+            }
+          ]
+        }
+    """
+    import datetime as _dt
+    import json as _json
+
+    now_utc = _dt.datetime.now(_dt.timezone.utc).isoformat()
+
+    # Determine worst-case terminal classification per action (fail-closed)
+    action_ucas: dict[str, list[UCAModel]] = {}
+    for uca in cs.unsafe_control_actions:
+        if uca.action != "*":
+            action_ucas.setdefault(uca.action, []).append(uca)
+
+    ca_by_name = {ca["name"]: ca for ca in cs.control_actions if "name" in ca}
+    all_actions = sorted(set(ca_by_name.keys()) | set(action_ucas.keys()))
+
+    read_only_tools: list[str] = []
+    mutating_tools: list[str] = []
+
+    for action in all_actions:
+        classifications: list[str] = []
+        ca = ca_by_name.get(action)
+        if ca and ca.get("terminal_classification"):
+            classifications.append(str(ca["terminal_classification"]))
+        for u in action_ucas.get(action, []):
+            if u.terminal_classification:
+                classifications.append(u.terminal_classification)
+
+        if classifications and all(c == "READ_ONLY" for c in classifications):
+            read_only_tools.append(action)
+        else:
+            mutating_tools.append(action)
+
+    ro_list_literal = ", ".join(_json.dumps(t) for t in read_only_tools)
+    if read_only_tools:
+        read_only_cel = (
+            'resource.type == "networkservices" && ('
+            f"destination.mcp.tool.name in [{ro_list_literal}] || "
+            'request.headers["mcp-method"] in ["tools/list", "prompts/list"])'
+        )
+    else:
+        read_only_cel = (
+            'resource.type == "networkservices" && '
+            'request.headers["mcp-method"] in ["tools/list", "prompts/list"]'
+        )
+
+    role_bindings: list[dict[str, Any]] = []
+    if cs.rbac_rules:
+        for role in sorted(cs.rbac_rules.roles, key=lambda r: r.name):
+            allowed = sorted(set(role.allowed_actions))
+            role_ro = [t for t in allowed if t in read_only_tools]
+            role_mut = [t for t in allowed if t not in read_only_tools]
+            allowed_literal = ", ".join(_json.dumps(t) for t in allowed)
+            if allowed:
+                cel_expr = (
+                    'resource.type == "networkservices" && '
+                    f"destination.mcp.tool.name in [{allowed_literal}]"
+                )
+            else:
+                cel_expr = 'resource.type == "networkservices" && false'
+
+            binding: dict[str, Any] = {
+                "role_name": role.name,
+                "allowed_tools": allowed,
+                "read_only_tools": role_ro,
+                "mutating_tools": role_mut,
+                "cel_expression": cel_expr,
+            }
+            if role.limits and role.limits.get("manual_review_below") is not None:
+                binding["manual_review_below"] = float(
+                    role.limits["manual_review_below"]
+                )
+            role_bindings.append(binding)
+
+    payload: dict[str, Any] = {
+        "_generated_by": "CAGE stpa_compiler",
+        "_source": "config/stpa_control_structure.yaml",
+        "_generated_at": now_utc,
+        "_schema_version": "1.0.0",
+        "role": "roles/iap.egressor",
+        "permission": "iap.webServiceVersions.egressViaIAP",
+        "read_only_tools": read_only_tools,
+        "mutating_tools": mutating_tools,
+        "read_only_cel_expression": read_only_cel,
+        "role_bindings": role_bindings,
+    }
+    return _json.dumps(payload, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# Sandbox / OpenShell Supervisor policy generator
+# ---------------------------------------------------------------------------
+
+
+def generate_sandbox_policy(cs: ControlStructureModel) -> str:
+    """Generate a deterministic OpenShell Supervisor / sandbox YAML policy.
+
+    Compiles STPA control actions, UCAs, and FTRA terminal classifications into
+    an out-of-process sandbox policy enforcing:
+      - ``filesystem_policy`` and ``landlock`` isolation defaults
+      - ``process`` binary allowlists
+      - ``credential_broker_rules`` requiring CAGE ``PreCredentials``
+        ``RoutingSeal`` verification before credential injection
+      - ``network_policies`` per governed action
+    """
+    now_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    allowed_binaries_set: set[str] = {"/usr/bin/python3"}
+    network_policies: dict[str, dict[str, Any]] = {}
+    credential_broker_rules: list[dict[str, Any]] = []
+
+    action_ucas: dict[str, list[UCAModel]] = {}
+    for uca in cs.unsafe_control_actions:
+        action_ucas.setdefault(uca.action, []).append(uca)
+        if uca.sandbox_rule and uca.sandbox_rule.allowed_binaries:
+            allowed_binaries_set.update(uca.sandbox_rule.allowed_binaries)
+
+    all_actions = sorted(
+        {ca["name"] for ca in cs.control_actions if "name" in ca}
+        | set(action_ucas.keys())
+    )
+    ca_by_name = {ca["name"]: ca for ca in cs.control_actions if "name" in ca}
+
+    for action in all_actions:
+        ucas = sorted(action_ucas.get(action, []), key=lambda u: u.id)
+        ca = ca_by_name.get(action)
+
+        # Determine worst-case FTRA terminal classification (fail-closed)
+        classifications: list[str] = []
+        if ca and ca.get("terminal_classification"):
+            classifications.append(str(ca["terminal_classification"]))
+        for u in ucas:
+            if u.terminal_classification:
+                classifications.append(u.terminal_classification)
+        if "IRREVERSIBLE_TERMINAL" in classifications or not classifications:
+            term_class = "IRREVERSIBLE_TERMINAL"
+        elif "EXTERNALLY_REVERSIBLE" in classifications:
+            term_class = "EXTERNALLY_REVERSIBLE"
+        elif "REVERSIBLE" in classifications:
+            term_class = "REVERSIBLE"
+        else:
+            term_class = "READ_ONLY"
+
+        endpoints: list[str] = []
+        verbs: list[str] = []
+        mcp_methods: list[str] = []
+        require_seal = term_class != "READ_ONLY"
+        cred_placeholders: list[str] = []
+
+        for u in ucas:
+            if u.sandbox_rule is not None:
+                for ep in u.sandbox_rule.allowed_endpoints:
+                    if ep not in endpoints:
+                        endpoints.append(ep)
+                for v in u.sandbox_rule.allowed_http_verbs:
+                    if v not in verbs:
+                        verbs.append(v)
+                for m in u.sandbox_rule.allowed_mcp_methods:
+                    if m not in mcp_methods:
+                        mcp_methods.append(m)
+                if u.sandbox_rule.require_routing_seal:
+                    require_seal = True
+                if (
+                    u.sandbox_rule.credential_placeholder
+                    and u.sandbox_rule.credential_placeholder not in cred_placeholders
+                ):
+                    cred_placeholders.append(u.sandbox_rule.credential_placeholder)
+
+        if not verbs:
+            verbs = ["GET"] if term_class == "READ_ONLY" else ["POST"]
+        if not mcp_methods:
+            mcp_methods = [f"tools/call:{action}"]
+
+        uca_refs = [u.id for u in ucas]
+        hazard_refs = sorted({h for u in ucas for h in u.hazard_refs})
+
+        network_policies[action] = {
+            "terminal_classification": term_class,
+            "require_routing_seal": require_seal,
+            "allowed_http_verbs": verbs,
+            "allowed_endpoints": endpoints
+            or [f"https://cage-gateway.internal/v1/mcp/tools/call/{action}"],
+            "allowed_mcp_methods": mcp_methods,
+            "uca_refs": uca_refs,
+            "hazard_refs": hazard_refs,
+        }
+
+        if require_seal:
+            credential_broker_rules.append(
+                {
+                    "action": action,
+                    "phase": "PreCredentials",
+                    "require_routing_seal": True,
+                    "seal_header": "X-CAGE-Routing-Seal",
+                    "credential_placeholders": cred_placeholders
+                    or ["CAGE_GOVERNED_CREDENTIAL"],
+                }
+            )
+
+    policy_doc: dict[str, Any] = {
+        "version": 1,
+        "metadata": {
+            "generated_by": "CAGE stpa_compiler",
+            "system": cs.system.name,
+            "system_version": cs.system.version,
+            "domain": cs.system.domain,
+            "require_cage_stera_seal": True,
+        },
+        "filesystem_policy": {
+            "include_workdir": True,
+            "read_only": ["/usr", "/lib", "/etc", "/app"],
+            "read_write": ["/sandbox", "/var/sandbox/scratch"],
+        },
+        "landlock": {
+            "compatibility": "best_effort",
+        },
+        "process": {
+            "run_as_user": "sandbox",
+            "run_as_group": "sandbox",
+            "allowed_binaries": sorted(allowed_binaries_set),
+        },
+        "credential_broker_rules": credential_broker_rules,
+        "network_policies": network_policies,
+    }
+
+    header = (
+        "# Copyright 2026 Google LLC\n"
+        "# SPDX-License-Identifier: Apache-2.0\n"
+        "#\n"
+        "# AUTO-GENERATED BY CAGE stpa_compiler — DO NOT EDIT MANUALLY\n"
+        f"# System: {cs.system.name} v{cs.system.version}\n"
+        f"# Generated: {now_utc}\n"
+        "---\n"
+    )
+    return header + yaml.safe_dump(policy_doc, sort_keys=False)
+
+
+# ---------------------------------------------------------------------------
+# Compiler orchestrator
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CompileResult:
+    opa_content: str = ""
+    nemo_content: str = ""
+    python_content: str = ""
+    langgraph_content: str = ""
+    agp_content: str = ""
+    ftra_content: str = ""
+    registry_content: str = ""
+    iap_cel_content: str = ""
+    sandbox_content: str = ""
+    errors: list[str] = field(default_factory=list)
+
+
+def load_control_structure(path: Path) -> ControlStructureModel:
+    """Load and validate the YAML control structure."""
+    if not path.exists():
+        raise FileNotFoundError(f"Control structure not found: {path}")
+    with open(path) as fh:
+        raw = yaml.safe_load(fh)
+    return ControlStructureModel(**raw)
+
+
+def load_control_structures(paths: list[Path]) -> ControlStructureModel:
+    """Load and merge multiple STPA control structure YAML files.
+
+    All paths must exist. The merge is deterministic given the same set of
+    files in sorted order: hazards, UCAs, and constraints are sorted by ID;
+    control actions are sorted by name. The caller should pass ``sorted(paths)``
+    to guarantee filesystem-order independence.
+
+    Args:
+        paths: Ordered list of YAML source paths. Must be non-empty.
+
+    Returns:
+        A single merged ``ControlStructureModel``.
+
+    Raises:
+        FileNotFoundError: If any path does not exist.
+        ValueError: If duplicate IDs are found across files or a UCA's
+                    hazard_ref does not resolve in the merged corpus.
+    """
+    if not paths:
+        raise ValueError("load_control_structures() requires at least one path")
+    models = [load_control_structure(p) for p in paths]
+    if len(models) == 1:
+        return models[0]
+    return ControlStructureModel.merge(models)
+
+
+def compile_control_structure(
+    cs: ControlStructureModel,
+    targets: list[str],
+) -> CompileResult:
+    """Compile the control structure into governance artifacts."""
+    result = CompileResult()
+    effective_targets = (
+        targets
+        if "all" not in targets
+        else ["opa", "nemo", "python", "langgraph", "ftra", "sandbox"]
+    )
+
+    if "opa" in effective_targets:
+        try:
+            result.opa_content = generate_opa(cs)
+        except Exception as exc:
+            result.errors.append(f"OPA generation failed: {exc}")
+
+    if "nemo" in effective_targets:
+        try:
+            result.nemo_content = generate_nemo(cs)
+        except Exception as exc:
+            result.errors.append(f"NeMo generation failed: {exc}")
+
+    if "langgraph" in effective_targets:
+        try:
+            result.langgraph_content = generate_langgraph(cs)
+        except Exception as exc:
+            result.errors.append(f"LangGraph Saga generation failed: {exc}")
+
+    if "python" in effective_targets:
+        try:
+            result.python_content = generate_python(cs)
+        except Exception as exc:
+            result.errors.append(f"Python generation failed: {exc}")
+
+    if "agp" in effective_targets:
+        try:
+            result.agp_content = generate_agp(cs)
+        except Exception as exc:
+            result.errors.append(f"AGP generation failed: {exc}")
+
+    if "ftra" in effective_targets:
+        try:
+            result.ftra_content = generate_terminal_registry(cs)
+        except Exception as exc:
+            result.errors.append(f"FTRA terminal registry generation failed: {exc}")
+
+    if "registry" in effective_targets:
+        try:
+            result.registry_content = generate_registry_manifest(cs)
+        except Exception as exc:
+            result.errors.append(f"Agent Registry manifest generation failed: {exc}")
+
+    if "iap-cel" in effective_targets:
+        try:
+            result.iap_cel_content = generate_iap_cel_policies(cs)
+        except Exception as exc:
+            result.errors.append(f"IAP CEL policy generation failed: {exc}")
+
+    if "sandbox" in effective_targets or "openshell" in effective_targets:
+        try:
+            result.sandbox_content = generate_sandbox_policy(cs)
+        except Exception as exc:
+            result.errors.append(f"Sandbox policy generation failed: {exc}")
+
+    return result
+
+
+def _ruff_format(path: Path) -> None:
+    """Run ``ruff format`` on a generated Python file (best-effort, no-op if ruff absent).
+
+    Resolves the ruff binary relative to the current Python interpreter so that
+    venv-installed ruff is found even when it is not on the system PATH.
+    """
+    import subprocess
+    import sys
+
+    # Prefer ruff installed alongside the current interpreter (venv-aware).
+    ruff_bin = Path(sys.executable).parent / "ruff"
+    if not ruff_bin.exists():
+        ruff_bin = Path("ruff")  # fall back to PATH
+
+    try:
+        subprocess.run(
+            [str(ruff_bin), "format", str(path)],
+            check=True,
+            capture_output=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        # ruff not installed or formatting failed — leave file as-is.
+        pass
+
+
+def write_artifacts(
+    result: CompileResult,
+    opa_out: Path,
+    nemo_out: Path,
+    python_out: Path,
+    langgraph_out: Path,
+    agp_out: Path | None = None,
+    ftra_out: Path | None = None,
+    registry_out: Path | None = None,
+    iap_cel_out: Path | None = None,
+    sandbox_out: Path | None = None,
+) -> None:
+    """Write generated artifacts to disk, creating parent dirs as needed."""
+    if result.opa_content:
+        opa_out.parent.mkdir(parents=True, exist_ok=True)
+        opa_out.write_text(result.opa_content)
+        logger.info("✅ OPA policy written → %s", opa_out)
+
+    if result.nemo_content:
+        nemo_out.parent.mkdir(parents=True, exist_ok=True)
+        nemo_out.write_text(result.nemo_content)
+        logger.info("✅ NeMo rails written → %s", nemo_out)
+
+    if result.python_content:
+        python_out.parent.mkdir(parents=True, exist_ok=True)
+        python_out.write_text(result.python_content)
+        _ruff_format(python_out)
+        logger.info("✅ Python validator written → %s", python_out)
+
+    if result.langgraph_content:
+        langgraph_out.parent.mkdir(parents=True, exist_ok=True)
+        langgraph_out.write_text(result.langgraph_content)
+        _ruff_format(langgraph_out)
+        logger.info("✅ LangGraph Saga nodes written → %s", langgraph_out)
+
+    if result.agp_content:
+        effective_agp_out = agp_out or _DEFAULT_AGP_OUT
+        effective_agp_out.parent.mkdir(parents=True, exist_ok=True)
+        effective_agp_out.write_text(result.agp_content)
+        logger.info("✅ AGP Semantic Policy written → %s", effective_agp_out)
+        char_count = len(result.agp_content)
+        if char_count > _AGP_CHAR_BUDGET:
+            logger.warning(
+                "⚠️  AGP output exceeds %d-char budget (%d chars). "
+                "Output contains TRUNCATED sentinel.",
+                _AGP_CHAR_BUDGET,
+                char_count,
+            )
+        else:
+            logger.info(
+                "   AGP character budget: %d/%d used (%.1f%%)",
+                char_count,
+                _AGP_CHAR_BUDGET,
+                100.0 * char_count / _AGP_CHAR_BUDGET,
+            )
+
+    if result.ftra_content:
+        effective_ftra_out = ftra_out or _DEFAULT_FTRA_OUT
+        effective_ftra_out.parent.mkdir(parents=True, exist_ok=True)
+        effective_ftra_out.write_text(result.ftra_content)
+        logger.info("✅ FTRA terminal registry written → %s", effective_ftra_out)
+
+    if result.registry_content:
+        effective_registry_out = registry_out or _DEFAULT_REGISTRY_OUT
+        effective_registry_out.parent.mkdir(parents=True, exist_ok=True)
+        effective_registry_out.write_text(result.registry_content)
+        logger.info("✅ Agent Registry manifest written → %s", effective_registry_out)
+
+    if result.iap_cel_content:
+        effective_iap_cel_out = iap_cel_out or _DEFAULT_IAP_CEL_OUT
+        effective_iap_cel_out.parent.mkdir(parents=True, exist_ok=True)
+        effective_iap_cel_out.write_text(result.iap_cel_content)
+        logger.info("✅ IAP CEL policies written → %s", effective_iap_cel_out)
+
+    if result.sandbox_content:
+        effective_sandbox_out = sandbox_out or _DEFAULT_SANDBOX_OUT
+        effective_sandbox_out.parent.mkdir(parents=True, exist_ok=True)
+        effective_sandbox_out.write_text(result.sandbox_content)
+        logger.info("✅ Sandbox policy written → %s", effective_sandbox_out)
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="stpa_compiler",
+        description=textwrap.dedent(
+            """\
+            STPA-to-Policy Compiler — transforms stpa_control_structure.yaml into
+            deterministic OPA Rego policies, NeMo Colang rails, and Python validators.
+            """
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Logging verbosity (default: INFO)",
+    )
+
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    # compile
+    compile_p = sub.add_parser(
+        "compile", help="Compile control structure to artifacts."
+    )
+    compile_p.add_argument(
+        "--input",
+        type=Path,
+        default=_DEFAULT_INPUT,
+        metavar="YAML",
+        help=f"Path to control structure YAML (default: {_DEFAULT_INPUT})",
+    )
+    compile_p.add_argument(
+        "--domain-yaml",
+        type=Path,
+        default=None,
+        metavar="YAML",
+        help="Path to a per-domain STPA YAML file (mutually exclusive with --input-dir).",
+    )
+    compile_p.add_argument(
+        "--out-dir",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="Output directory for per-domain compilation (uca_rules.py, saga_nodes.py, terminal_registry.json).",
+    )
+    compile_p.add_argument(
+        "--input-dir",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help=(
+            "Directory of STPA YAML source files (mutually exclusive with --input). "
+            "All *.yaml files under DIR are merged deterministically. "
+            f"Default directory: {_DEFAULT_INPUT_DIR}"
+        ),
+    )
+    compile_p.add_argument(
+        "--targets",
+        nargs="+",
+        choices=[
+            "opa",
+            "nemo",
+            "python",
+            "langgraph",
+            "agp",
+            "ftra",
+            "registry",
+            "iap-cel",
+            "sandbox",
+            "openshell",
+            "all",
+        ],
+        default=["all"],
+        help=(
+            "Artifacts to generate (default: all). "
+            "Use 'agp' for AGP Semantic Policy. "
+            "Use 'ftra' for FTRA terminal registry (config/ftra/terminal_registry.json). "
+            "Use 'registry' for GEAP Agent Registry tool authorization manifest "
+            "(GCP Adaptation — config/registry/generated_tool_authorizations.json). "
+            "Use 'iap-cel' for GEAP IAM CEL egress conditions "
+            "(GCP Adaptation — config/registry/generated_iap_cel_policies.json). "
+            "Use 'sandbox' (or 'openshell') for OpenShell Supervisor sandbox policy "
+            "(config/sandbox/generated_sandbox_policy.yaml)."
+        ),
+    )
+    compile_p.add_argument(
+        "--opa-out",
+        type=Path,
+        default=_DEFAULT_OPA_OUT,
+        metavar="FILE",
+        help=f"OPA output path (default: {_DEFAULT_OPA_OUT})",
+    )
+    compile_p.add_argument(
+        "--nemo-out",
+        type=Path,
+        default=_DEFAULT_NEMO_OUT,
+        metavar="FILE",
+        help=f"NeMo output path (default: {_DEFAULT_NEMO_OUT})",
+    )
+    compile_p.add_argument(
+        "--python-out",
+        type=Path,
+        default=_DEFAULT_PY_OUT,
+        metavar="FILE",
+        help=f"Python output path (default: {_DEFAULT_PY_OUT})",
+    )
+    compile_p.add_argument(
+        "--langgraph-out",
+        type=Path,
+        default=_DEFAULT_LG_OUT,
+        metavar="FILE",
+        help=f"LangGraph Saga output path (default: {_DEFAULT_LG_OUT})",
+    )
+    compile_p.add_argument(
+        "--agp-out",
+        type=Path,
+        default=_DEFAULT_AGP_OUT,
+        metavar="FILE",
+        help=f"AGP Semantic Policy output path (default: {_DEFAULT_AGP_OUT})",
+    )
+    compile_p.add_argument(
+        "--ftra-out",
+        type=Path,
+        default=_DEFAULT_FTRA_OUT,
+        metavar="FILE",
+        help=f"FTRA terminal registry output path (default: {_DEFAULT_FTRA_OUT})",
+    )
+    compile_p.add_argument(
+        "--registry-out",
+        type=Path,
+        default=_DEFAULT_REGISTRY_OUT,
+        metavar="FILE",
+        help=(
+            f"Agent Registry manifest output path (default: {_DEFAULT_REGISTRY_OUT}). "
+            "GCP Adaptation — only used when --targets registry is specified."
+        ),
+    )
+    compile_p.add_argument(
+        "--iap-cel-out",
+        type=Path,
+        default=_DEFAULT_IAP_CEL_OUT,
+        metavar="FILE",
+        help=(
+            f"IAP CEL policies output path (default: {_DEFAULT_IAP_CEL_OUT}). "
+            "GCP Adaptation — only used when --targets iap-cel is specified."
+        ),
+    )
+    compile_p.add_argument(
+        "--sandbox-out",
+        type=Path,
+        default=_DEFAULT_SANDBOX_OUT,
+        metavar="FILE",
+        help=f"Sandbox/OpenShell policy output path (default: {_DEFAULT_SANDBOX_OUT})",
+    )
+    compile_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print generated content to stdout without writing files.",
+    )
+
+    # validate
+    val_p = sub.add_parser(
+        "validate", help="Validate the control structure YAML without compiling."
+    )
+    val_p.add_argument(
+        "--input",
+        type=Path,
+        default=_DEFAULT_INPUT,
+        metavar="YAML",
+        help=f"Path to control structure YAML (default: {_DEFAULT_INPUT})",
+    )
+    val_p.add_argument(
+        "--domain-yaml",
+        type=Path,
+        default=None,
+        metavar="YAML",
+        help="Path to a per-domain STPA YAML file to validate.",
+    )
+    val_p.add_argument(
+        "--input-dir",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help=(
+            "Directory of STPA YAML source files to validate (mutually exclusive with --input)."
+        ),
+    )
+
+    return parser
+
+
+def cmd_validate(args: argparse.Namespace) -> int:
+    try:
+        if getattr(args, "domain_yaml", None) is not None:
+            cs = load_control_structure(args.domain_yaml)
+        elif args.input_dir is not None:
+            yaml_files = sorted(args.input_dir.rglob("*.yaml"))
+            if not yaml_files:
+                print(f"❌ No YAML files found under {args.input_dir}", file=sys.stderr)
+                return 1
+            cs = load_control_structures(yaml_files)
+        else:
+            cs = load_control_structure(args.input)
+        print(
+            f"✅ Control structure valid: {len(cs.unsafe_control_actions)} UCAs, "
+            f"{len(cs.hazards)} hazards, {len(cs.safety_constraints)} constraints."
+        )
+        return 0
+    except Exception as exc:
+        print(f"❌ Validation failed: {exc}", file=sys.stderr)
+        return 1
+
+
+def cmd_compile(args: argparse.Namespace) -> int:
+    try:
+        if getattr(args, "domain_yaml", None) is not None:
+            cs = load_control_structure(args.domain_yaml)
+        elif args.input_dir is not None:
+            yaml_files = sorted(args.input_dir.rglob("*.yaml"))
+            if not yaml_files:
+                print(
+                    f"❌ No YAML files found under {args.input_dir}",
+                    file=sys.stderr,
+                )
+                return 1
+            logger.info(
+                "Multi-source mode: loading %d files from %s",
+                len(yaml_files),
+                args.input_dir,
+            )
+            cs = load_control_structures(yaml_files)
+        else:
+            cs = load_control_structure(args.input)
+    except Exception as exc:
+        print(f"❌ Failed to load control structure: {exc}", file=sys.stderr)
+        return 1
+
+    effective_targets = args.targets
+    if getattr(args, "out_dir", None) is not None and args.targets == ["all"]:
+        effective_targets = ["python", "langgraph", "ftra"]
+
+    result = compile_control_structure(cs, effective_targets)
+
+    if result.errors:
+        for err in result.errors:
+            print(f"❌ {err}", file=sys.stderr)
+        return 1
+
+    if args.dry_run:
+        sep = "\n" + "=" * 80 + "\n"
+        if result.opa_content:
+            print(sep + "OPA REGO" + sep + result.opa_content)
+        if result.nemo_content:
+            print(sep + "NEMO COLANG" + sep + result.nemo_content)
+        if result.python_content:
+            print(sep + "PYTHON VALIDATOR" + sep + result.python_content)
+        if result.langgraph_content:
+            print(sep + "LANGGRAPH SAGA NODES" + sep + result.langgraph_content)
+        if result.agp_content:
+            char_count = len(result.agp_content)
+            print(
+                sep
+                + f"AGP SEMANTIC POLICY ({char_count}/{_AGP_CHAR_BUDGET} chars)"
+                + sep
+                + result.agp_content
+            )
+            if char_count > _AGP_CHAR_BUDGET:
+                print(
+                    f"⚠️  WARNING: AGP output exceeds {_AGP_CHAR_BUDGET}-char budget.",
+                    file=sys.stderr,
+                )
+        if result.ftra_content:
+            print(sep + "FTRA TERMINAL REGISTRY (JSON)" + sep + result.ftra_content)
+        if result.registry_content:
+            print(
+                sep
+                + "AGENT REGISTRY MANIFEST (JSON) [GCP Adaptation]"
+                + sep
+                + result.registry_content
+            )
+        if result.iap_cel_content:
+            print(
+                sep
+                + "IAP CEL POLICIES (JSON) [GCP Adaptation]"
+                + sep
+                + result.iap_cel_content
+            )
+        if result.sandbox_content:
+            print(sep + "SANDBOX POLICY (YAML)" + sep + result.sandbox_content)
+        return 0
+
+    python_out = args.python_out
+    langgraph_out = args.langgraph_out
+    ftra_out = args.ftra_out
+    if getattr(args, "out_dir", None) is not None:
+        python_out = args.out_dir / "uca_rules.py"
+        langgraph_out = args.out_dir / "saga_nodes.py"
+        ftra_out = args.out_dir / "terminal_registry.json"
+
+    write_artifacts(
+        result,
+        args.opa_out,
+        args.nemo_out,
+        python_out,
+        langgraph_out,
+        agp_out=args.agp_out,
+        ftra_out=ftra_out,
+        registry_out=args.registry_out,
+        iap_cel_out=getattr(args, "iap_cel_out", _DEFAULT_IAP_CEL_OUT),
+        sandbox_out=args.sandbox_out,
+    )
+    print("✅ STPA compiler finished. Artifacts written:")
+    if result.opa_content:
+        print(f"   OPA Rego  → {args.opa_out}")
+    if result.nemo_content:
+        print(f"   NeMo Colang → {args.nemo_out}")
+    if result.python_content:
+        print(f"   Python validator → {python_out}")
+    if result.langgraph_content:
+        print(f"   LangGraph Saga → {langgraph_out}")
+    if result.agp_content:
+        print(f"   AGP Semantic Policy → {args.agp_out}")
+    if result.ftra_content:
+        print(f"   FTRA terminal registry → {ftra_out}")
+    if result.registry_content:
+        print(f"   Agent Registry manifest [GCP] → {args.registry_out}")
+    if result.iap_cel_content:
+        print(
+            f"   IAP CEL policies [GCP] → {getattr(args, 'iap_cel_out', _DEFAULT_IAP_CEL_OUT)}"
+        )
+    if result.sandbox_content:
+        print(f"   Sandbox policy → {args.sandbox_out}")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+    if args.command == "validate":
+        return cmd_validate(args)
+    if args.command == "compile":
+        return cmd_compile(args)
+    parser.print_help()
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

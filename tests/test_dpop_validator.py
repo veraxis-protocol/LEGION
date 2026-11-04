@@ -1,0 +1,504 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""
+Unit tests for DPoP validator.
+
+Tests RFC 9449 proof-of-possession validation and mTLS certificate binding.
+"""
+
+import base64
+import json
+import time
+from datetime import datetime, timedelta
+
+import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from cryptography.x509.oid import NameOID
+
+from src.gateway.server.dpop_validator import DPoPValidator, TokenBindingError
+
+pytestmark = [pytest.mark.unit, pytest.mark.local]
+
+
+class TestDPoPValidator:
+    """Test suite for DPoP validator."""
+
+    @pytest.fixture
+    def validator(self):
+        """Create DPoP validator instance."""
+        return DPoPValidator(max_age_seconds=60)
+
+    @pytest.fixture
+    def test_keypair(self):
+        """Generate test RSA keypair."""
+        private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        public_key = private_key.public_key()
+        return private_key, public_key
+
+    @pytest.fixture
+    def test_cert_pem(self, test_keypair):
+        """Generate test X.509 certificate."""
+        private_key, public_key = test_keypair
+
+        subject = issuer = x509.Name(
+            [
+                x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
+                x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, "California"),
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Test Client"),
+                x509.NameAttribute(NameOID.COMMON_NAME, "testclient.example.com"),
+            ]
+        )
+
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(issuer)
+            .public_key(public_key)
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(datetime.utcnow())
+            .not_valid_after(datetime.utcnow() + timedelta(days=365))
+            .sign(private_key, hashes.SHA256())
+        )
+
+        return cert.public_bytes(serialization.Encoding.PEM).decode("utf-8")
+
+    def _create_dpop_jwt(
+        self, private_key, public_key, htm: str, htu: str, iat: int, jti: str
+    ) -> str:
+        """Create a test DPoP JWT."""
+        # Build JWK from public key
+        public_numbers = public_key.public_numbers()
+        jwk = {
+            "kty": "RSA",
+            "n": self._base64url_encode(
+                public_numbers.n.to_bytes(
+                    (public_numbers.n.bit_length() + 7) // 8, "big"
+                )
+            ),
+            "e": self._base64url_encode(
+                public_numbers.e.to_bytes(
+                    (public_numbers.e.bit_length() + 7) // 8, "big"
+                )
+            ),
+        }
+
+        header = {
+            "typ": "dpop+jwt",
+            "alg": "RS256",
+            "jwk": jwk,
+        }
+
+        payload = {
+            "htm": htm,
+            "htu": htu,
+            "iat": iat,
+            "jti": jti,
+        }
+
+        header_b64 = self._base64url_encode(json.dumps(header).encode("utf-8"))
+        payload_b64 = self._base64url_encode(json.dumps(payload).encode("utf-8"))
+        signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
+        signature = private_key.sign(signing_input, padding.PKCS1v15(), hashes.SHA256())
+        signature_b64 = self._base64url_encode(signature)
+
+        return f"{header_b64}.{payload_b64}.{signature_b64}"
+
+    def _base64url_encode(self, data: bytes) -> str:
+        """Encode bytes to base64url."""
+        return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+    @pytest.mark.asyncio
+    async def test_valid_dpop_proof(self, validator, test_keypair, test_cert_pem):
+        """Test happy-path: valid DPoP proof bound to matching client certificate."""
+        private_key, public_key = test_keypair
+
+        current_time = int(time.time())
+        dpop_proof = self._create_dpop_jwt(
+            private_key=private_key,
+            public_key=public_key,
+            htm="POST",
+            htu="https://api.example.com/resource",
+            iat=current_time,
+            jti="unique-token-id-123",
+        )
+
+        result = await validator.validate_token_binding(
+            dpop_proof=dpop_proof,
+            client_cert_pem=test_cert_pem,
+            expected_uri="https://api.example.com/resource",
+            http_method="POST",
+        )
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_mismatched_public_key(self, validator, test_keypair, test_cert_pem):
+        """Test fail-closed: reject DPoP proof with different public key."""
+        # Generate different keypair for DPoP proof
+        different_private_key = rsa.generate_private_key(
+            public_exponent=65537, key_size=2048
+        )
+        different_public_key = different_private_key.public_key()
+
+        current_time = int(time.time())
+        dpop_proof = self._create_dpop_jwt(
+            private_key=different_private_key,
+            public_key=different_public_key,
+            htm="POST",
+            htu="https://api.example.com/resource",
+            iat=current_time,
+            jti="unique-token-id-456",
+        )
+
+        with pytest.raises(TokenBindingError, match="Public key mismatch"):
+            await validator.validate_token_binding(
+                dpop_proof=dpop_proof,
+                client_cert_pem=test_cert_pem,
+                expected_uri="https://api.example.com/resource",
+                http_method="POST",
+            )
+
+    @pytest.mark.asyncio
+    async def test_forged_signature_rejected(
+        self, validator, test_keypair, test_cert_pem
+    ):
+        """Reject a proof whose jwk matches the cert but signature is forged.
+
+        The header jwk is the cert's own (public) key, so the thumbprint check
+        passes; only signature verification stands between an attacker and a
+        forged proof-of-possession. Also verify that a forged proof does not
+        consume its jti in the replay cache.
+        """
+        private_key, public_key = test_keypair
+        public_numbers = public_key.public_numbers()
+        jwk = {
+            "kty": "RSA",
+            "n": self._base64url_encode(
+                public_numbers.n.to_bytes(
+                    (public_numbers.n.bit_length() + 7) // 8, "big"
+                )
+            ),
+            "e": self._base64url_encode(
+                public_numbers.e.to_bytes(
+                    (public_numbers.e.bit_length() + 7) // 8, "big"
+                )
+            ),
+        }
+        header = {"typ": "dpop+jwt", "alg": "RS256", "jwk": jwk}
+        payload = {
+            "htm": "POST",
+            "htu": "https://api.example.com/resource",
+            "iat": int(time.time()),
+            "jti": "forged-token-id",
+        }
+        header_b64 = self._base64url_encode(json.dumps(header).encode("utf-8"))
+        payload_b64 = self._base64url_encode(json.dumps(payload).encode("utf-8"))
+        signature_b64 = self._base64url_encode(b"not-a-real-signature")
+        dpop_proof = f"{header_b64}.{payload_b64}.{signature_b64}"
+
+        with pytest.raises(TokenBindingError, match="signature verification failed"):
+            await validator.validate_token_binding(
+                dpop_proof=dpop_proof,
+                client_cert_pem=test_cert_pem,
+                expected_uri="https://api.example.com/resource",
+                http_method="POST",
+            )
+
+        # Legitimate proof with the same jti must still succeed since the
+        # forged proof was rejected prior to recording the jti.
+        valid_proof = self._create_dpop_jwt(
+            private_key=private_key,
+            public_key=public_key,
+            htm="POST",
+            htu="https://api.example.com/resource",
+            iat=int(time.time()),
+            jti="forged-token-id",
+        )
+        assert (
+            await validator.validate_token_binding(
+                dpop_proof=valid_proof,
+                client_cert_pem=test_cert_pem,
+                expected_uri="https://api.example.com/resource",
+                http_method="POST",
+            )
+            is True
+        )
+
+    @pytest.mark.asyncio
+    async def test_expired_proof(self, validator, test_keypair, test_cert_pem):
+        """Test fail-closed: reject expired DPoP proof (timestamp skew > 60s)."""
+        private_key, public_key = test_keypair
+
+        # Create proof with timestamp 120 seconds in the past
+        old_time = int(time.time()) - 120
+        dpop_proof = self._create_dpop_jwt(
+            private_key=private_key,
+            public_key=public_key,
+            htm="POST",
+            htu="https://api.example.com/resource",
+            iat=old_time,
+            jti="unique-token-id-789",
+        )
+
+        with pytest.raises(TokenBindingError, match="DPoP proof expired"):
+            await validator.validate_token_binding(
+                dpop_proof=dpop_proof,
+                client_cert_pem=test_cert_pem,
+                expected_uri="https://api.example.com/resource",
+                http_method="POST",
+            )
+
+    @pytest.mark.asyncio
+    async def test_uri_mismatch(self, validator, test_keypair, test_cert_pem):
+        """Test fail-closed: reject DPoP proof with mismatched URI (htu claim)."""
+        private_key, public_key = test_keypair
+
+        current_time = int(time.time())
+        dpop_proof = self._create_dpop_jwt(
+            private_key=private_key,
+            public_key=public_key,
+            htm="POST",
+            htu="https://attacker.example.com/evil",
+            iat=current_time,
+            jti="unique-token-id-999",
+        )
+
+        with pytest.raises(TokenBindingError, match="URI mismatch"):
+            await validator.validate_token_binding(
+                dpop_proof=dpop_proof,
+                client_cert_pem=test_cert_pem,
+                expected_uri="https://api.example.com/resource",
+                http_method="POST",
+            )
+
+    @pytest.mark.asyncio
+    async def test_http_method_mismatch(self, validator, test_keypair, test_cert_pem):
+        """Test fail-closed: reject DPoP proof with mismatched HTTP method."""
+        private_key, public_key = test_keypair
+
+        current_time = int(time.time())
+        dpop_proof = self._create_dpop_jwt(
+            private_key=private_key,
+            public_key=public_key,
+            htm="GET",
+            htu="https://api.example.com/resource",
+            iat=current_time,
+            jti="unique-token-id-111",
+        )
+
+        with pytest.raises(TokenBindingError, match="HTTP method mismatch"):
+            await validator.validate_token_binding(
+                dpop_proof=dpop_proof,
+                client_cert_pem=test_cert_pem,
+                expected_uri="https://api.example.com/resource",
+                http_method="POST",
+            )
+
+    @pytest.mark.asyncio
+    async def test_jti_replay_protection(self, validator, test_keypair, test_cert_pem):
+        """Test fail-closed: reject replayed JTI."""
+        private_key, public_key = test_keypair
+
+        current_time = int(time.time())
+        dpop_proof = self._create_dpop_jwt(
+            private_key=private_key,
+            public_key=public_key,
+            htm="POST",
+            htu="https://api.example.com/resource",
+            iat=current_time,
+            jti="replay-token-id",
+        )
+
+        # First use should succeed
+        await validator.validate_token_binding(
+            dpop_proof=dpop_proof,
+            client_cert_pem=test_cert_pem,
+            expected_uri="https://api.example.com/resource",
+            http_method="POST",
+        )
+
+        # Second use with same JTI should fail
+        with pytest.raises(TokenBindingError, match="JTI replay detected"):
+            await validator.validate_token_binding(
+                dpop_proof=dpop_proof,
+                client_cert_pem=test_cert_pem,
+                expected_uri="https://api.example.com/resource",
+                http_method="POST",
+            )
+
+    @pytest.mark.asyncio
+    async def test_malformed_jwt(self, validator, test_cert_pem):
+        """Test fail-closed: reject malformed JWT structure."""
+        malformed_proof = "invalid.jwt"
+
+        with pytest.raises(TokenBindingError, match="Invalid DPoP JWT format"):
+            await validator.validate_token_binding(
+                dpop_proof=malformed_proof,
+                client_cert_pem=test_cert_pem,
+                expected_uri="https://api.example.com/resource",
+                http_method="POST",
+            )
+
+    @pytest.mark.asyncio
+    async def test_missing_required_claims(
+        self, validator, test_keypair, test_cert_pem
+    ):
+        """Test fail-closed: reject JWT missing required claims."""
+        _private_key, public_key = test_keypair
+        public_numbers = public_key.public_numbers()
+
+        jwk = {
+            "kty": "RSA",
+            "n": self._base64url_encode(
+                public_numbers.n.to_bytes(
+                    (public_numbers.n.bit_length() + 7) // 8, "big"
+                )
+            ),
+            "e": self._base64url_encode(
+                public_numbers.e.to_bytes(
+                    (public_numbers.e.bit_length() + 7) // 8, "big"
+                )
+            ),
+        }
+
+        header = {"typ": "dpop+jwt", "alg": "RS256", "jwk": jwk}
+        payload = {"htm": "POST"}  # Missing htu, iat, jti
+
+        header_b64 = self._base64url_encode(json.dumps(header).encode("utf-8"))
+        payload_b64 = self._base64url_encode(json.dumps(payload).encode("utf-8"))
+        signature_b64 = self._base64url_encode(b"fake_signature")
+
+        dpop_proof = f"{header_b64}.{payload_b64}.{signature_b64}"
+
+        with pytest.raises(TokenBindingError, match="Missing required DPoP claim"):
+            await validator.validate_token_binding(
+                dpop_proof=dpop_proof,
+                client_cert_pem=test_cert_pem,
+                expected_uri="https://api.example.com/resource",
+                http_method="POST",
+            )
+
+    @pytest.mark.asyncio
+    async def test_future_timestamp(self, validator, test_keypair, test_cert_pem):
+        """Test fail-closed: reject DPoP proof with timestamp in the future."""
+        private_key, public_key = test_keypair
+
+        # Create proof with timestamp 10 seconds in the future
+        future_time = int(time.time()) + 10
+        dpop_proof = self._create_dpop_jwt(
+            private_key=private_key,
+            public_key=public_key,
+            htm="POST",
+            htu="https://api.example.com/resource",
+            iat=future_time,
+            jti="future-token-id",
+        )
+
+        with pytest.raises(TokenBindingError, match="timestamp is in the future"):
+            await validator.validate_token_binding(
+                dpop_proof=dpop_proof,
+                client_cert_pem=test_cert_pem,
+                expected_uri="https://api.example.com/resource",
+                http_method="POST",
+            )
+
+    @pytest.mark.asyncio
+    async def test_malformed_json_payload_raises_token_binding_error(
+        self, validator, test_cert_pem
+    ):
+        """Test fail-closed: invalid JSON inside base64url segment raises TokenBindingError."""
+        bad_header = self._base64url_encode(b"{not-valid-json")
+        bad_payload = self._base64url_encode(b"{}")
+        bad_sig = self._base64url_encode(b"sig")
+        dpop_proof = f"{bad_header}.{bad_payload}.{bad_sig}"
+
+        with pytest.raises(TokenBindingError, match="Failed to decode DPoP JWT"):
+            await validator.validate_token_binding(
+                dpop_proof=dpop_proof,
+                client_cert_pem=test_cert_pem,
+                expected_uri="https://api.example.com/resource",
+                http_method="POST",
+            )
+
+    @pytest.mark.asyncio
+    async def test_boolean_iat_rejected(self, validator, test_keypair, test_cert_pem):
+        """Test fail-closed: boolean iat claim is rejected as non-numeric."""
+        private_key, public_key = test_keypair
+        dpop_proof = self._create_dpop_jwt(
+            private_key=private_key,
+            public_key=public_key,
+            htm="POST",
+            htu="https://api.example.com/resource",
+            iat=True,  # type: ignore[arg-type]
+            jti="bool-iat-token",
+        )
+
+        with pytest.raises(TokenBindingError, match="Invalid DPoP 'iat' claim"):
+            await validator.validate_token_binding(
+                dpop_proof=dpop_proof,
+                client_cert_pem=test_cert_pem,
+                expected_uri="https://api.example.com/resource",
+                http_method="POST",
+            )
+
+    @pytest.mark.asyncio
+    async def test_redis_backed_cross_replica_jti_replay_protection(
+        self, test_keypair, test_cert_pem
+    ):
+        """Two distinct DPoPValidator instances sharing Redis reject JTI replay across replicas."""
+        private_key, public_key = test_keypair
+        store: dict[str, str] = {}
+
+        class _FakeRedis:
+            async def exists(self, key: str) -> int:
+                return 1 if key in store else 0
+
+            async def set(
+                self, key: str, value: str, *, nx: bool = False, ex: int = 0
+            ) -> bool:
+                if nx and key in store:
+                    return False
+                store[key] = value
+                return True
+
+        shared_redis = _FakeRedis()
+        replica_a = DPoPValidator(max_age_seconds=60, redis_client=shared_redis)
+        replica_b = DPoPValidator(max_age_seconds=60, redis_client=shared_redis)
+
+        dpop_proof = self._create_dpop_jwt(
+            private_key=private_key,
+            public_key=public_key,
+            htm="POST",
+            htu="https://api.example.com/resource",
+            iat=int(time.time()),
+            jti="cross-replica-jti-001",
+        )
+
+        assert await replica_a.validate_token_binding(
+            dpop_proof=dpop_proof,
+            client_cert_pem=test_cert_pem,
+            expected_uri="https://api.example.com/resource",
+            http_method="POST",
+        )
+
+        with pytest.raises(TokenBindingError, match="JTI replay detected"):
+            await replica_b.validate_token_binding(
+                dpop_proof=dpop_proof,
+                client_cert_pem=test_cert_pem,
+                expected_uri="https://api.example.com/resource",
+                http_method="POST",
+            )

@@ -1,0 +1,62 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# lula-validation-ai600-data-privacy.yaml
+# NIST AI 600-1 §2.2 — Data Privacy controls
+#
+# Validates: Presidio PII sanitizer active; PII audit log encrypted (CMEK).
+# POAM: AI600-002
+# Phase: 0 (stub — always passes) → Phase 2 (real assertions replace stub)
+# Region: US_FED (CAGE_DEPLOYMENT_REGION=US_FED)
+
+component-definition:
+  uuid: 10f64ac1-81e2-463e-a0d9-3b39c93cb9e3
+  metadata:
+    title: CAGE Validation — AI600-Data-Privacy
+    last-modified: '2026-07-09T00:00:00Z'
+    version: 1.0.0
+    oscal-version: 1.1.2
+    remarks: 'Phase-0 stub for AI 600-1 §2.2 Data Privacy controls.
+      Always passes until Phase 2 real assertions are implemented per §5.4.
+      Region: US_FED. POAM: AI600-002.'
+  components:
+  - uuid: a3f43860-0eca-4635-b9d9-22f81f4ca9b4
+    type: software
+    title: CAGE Cybernetic Governance Engine
+    description: The Cybernetic AI Governance Engine (CAGE) — AI governance gateway, compliance bridge, and governed financial advisor.
+    control-implementations:
+    - uuid: 36e6e16a-a854-4ced-87a9-2b017580b199
+      source: https://airc.nist.gov/Docs/1
+      description: 'Control implementation for AI600-Data-Privacy. Region: US_FED. Phase: 0 stub.'
+      implemented-requirements:
+      - uuid: 2c91e53d-5ec2-4223-99d3-be7dfce07fbc
+        control-id: ai600-data-privacy
+        description: Phase-0 stub for AI 600-1 §2.2 data privacy controls.
+        links:
+        - href: '#d6734f08-028c-4170-a796-6a63a2beb311'
+          rel: lula
+  back-matter:
+    resources:
+    - uuid: d6734f08-028c-4170-a796-6a63a2beb311
+      title: Lula Validation — AI600-Data-Privacy
+      rlinks:
+      - href: lula.dev
+      description: "domain:\n  type: kubernetes\n  kubernetes:\n    resources: []\n\
+        \    # Phase 2 will assert:\n    #   - pii-sanitizer-config ConfigMap exists\
+        \ in governance-stack namespace\n    #   - PII_AUDIT_LOG_ENABLED=true in ConfigMap\n\
+        \    #   - CMEK encryption active via cmek_guard.py health check\nprovider:\n\
+        \  type: opa\n  opa-spec:\n    rego: \"package lula\\n\\n# Phase-0 stub —\
+        \ always passes until Phase 2\\n# Phase 2 real assertion (see §5.4 of AI_600_1_IMPLEMENTATION_PLAN.md):\\\
+        n#   validate if {\\n#     input[\\\"pii-sanitizer-config\\\"].data.PII_AUDIT_LOG_ENABLED\
+        \ == \\\"true\\\"\\n#   }\\nvalidate := true\\n\"\n"

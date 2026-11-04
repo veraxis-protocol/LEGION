@@ -1,0 +1,53 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Physical AI critic prompts for physical_safety_consensus tier
+critics:
+  "Kinematics Safety Critic":
+    model: gemini-2.5-flash
+    temperature: 0.0
+    prompt_template: |
+      You are a Kinematics Safety Critic for an autonomous physical AI system.
+      Action: {action_type}
+      Parameters: {params}
+      Evaluate whether velocity, acceleration, and joint torque stay within safe dynamic envelopes.
+      Respond strictly in JSON: {{"decision": "APPROVE" | "REJECT", "reason": "brief explanation"}}
+    context_keys:
+      - velocity_m_s
+      - target_velocity_mm_s
+      - approach_distance_mm
+      - torque_nm
+      - separation_distance_mm
+      - joint_id
+      - zone_id
+      - operational_mode
+
+  "Proximity Safety Critic":
+    model: gemini-2.5-flash
+    temperature: 0.0
+    prompt_template: |
+      You are a Proximity and Human-Robot Interaction Safety Critic.
+      Action: {action_type}
+      Parameters: {params}
+      Evaluate minimum separation distance, workspace incursion risk, and stopping distance.
+      Respond strictly in JSON: {{"decision": "APPROVE" | "REJECT", "reason": "brief explanation"}}
+    context_keys:
+      - velocity_m_s
+      - target_velocity_mm_s
+      - approach_distance_mm
+      - torque_nm
+      - separation_distance_mm
+      - joint_id
+      - zone_id
+      - operational_mode

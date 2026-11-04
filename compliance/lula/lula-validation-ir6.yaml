@@ -1,0 +1,65 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# lula-validation-ir6.yaml
+# NIST SP 800-53 Rev 5 — IR-6: Incident Reporting
+#
+# Asserts that the compliance-bridge service is running and ready in the cluster.
+# The compliance-bridge (src/compliance_bridge/) handles incident notification
+# via audit_workflow.py and notifier.py — it is the primary incident reporting
+# mechanism for this system, sending alerts to Slack/PagerDuty on critical
+# compliance failures (ISO 42001 A.9.2, SC-4, AU-12 violations).
+#
+# Domain: kubernetes → compliance-bridge Deployment
+# Provider: opa (inline Rego)
+#
+# References:
+#   - src/compliance_bridge/notifier.py — Incident notification dispatcher
+#   - src/compliance_bridge/audit_workflow.py — Compliance audit + alert pipeline
+#   - deployment/k8s/compliance-bridge.yaml — compliance-bridge Deployment manifest
+#   - docs/ROLES_AND_RESPONSIBILITIES.md — IR-6 ISSO/ISSM responsibilities
+#
+# Namespace: governance-stack (confirmed from live cluster deployment snapshot)
+
+component-definition:
+  uuid: af8c8932-9540-5dda-8799-2696a2adf618
+  metadata:
+    title: CAGE Validation — IR6
+    last-modified: '2026-07-01T13:18:54Z'
+    version: 1.0.0
+    oscal-version: 1.1.2
+    remarks: "Auto-converted from standalone lula validation format.\nRegion: US_FED. Posture: nist-sp800-53.\nNotes: NIST SP 800-53 Rev 5 IR-6: Incident Reporting. Namespace: governance-stack (confirmed from live cluster deployment snapshot). Automated verification that the compliance-bridge incident reporting service is live and operational. The compliance-bridge (src/compliance_bridge/) provides:\n  - Real-time Slack/PagerDuty alerting via notifier.py\n  - Compliance audit workflow with critical-failure alerting via audit_workflow.py\n  - The /v1/metrics/* API endpoints consumed by other Lula validations\nIR-6 requires that security incidents be reported to appropriate organizational officials and external authorities within defined timeframes — the compliance-bridge is the automated first-responder for this requirement. See: compliance/continuous-monitoring/ISCM_STRATEGY.md — IR-6 monitoring cadence. See: docs/ROLES_AND_RESPONSIBILITIES.md — ISSO/ISSM incident response chain."
+  components:
+  - uuid: cd3eece5-1330-586c-9103-aa82e530c38f
+    type: software
+    title: CAGE Cybernetic Governance Engine
+    description: The Cybernetic AI Governance Engine (CAGE) — AI governance gateway, compliance bridge, and governed financial advisor.
+    control-implementations:
+    - uuid: 92301774-6531-538c-ac3f-5509744b1aa0
+      source: https://csrc.nist.gov/publications/detail/sp/800-53/rev-5/final
+      description: 'Control implementation for IR6. Region: US_FED. Posture: nist-sp800-53.'
+      implemented-requirements:
+      - uuid: 3fdd491f-1d9e-523a-a46d-07abfedf72f1
+        control-id: ir6
+        description: Automated lula validation for IR6.
+        links:
+        - href: '#07d356e8-2cf4-5aa3-8523-cd3e868d4367'
+          rel: lula
+  back-matter:
+    resources:
+    - uuid: 07d356e8-2cf4-5aa3-8523-cd3e868d4367
+      title: Lula Validation — IR6
+      rlinks:
+      - href: lula.dev
+      description: "domain:\n  type: kubernetes\n  kubernetes-spec:\n    resources:\n    - name: compliance-bridge-deployment\n      resource: deployments\n      namespace: governance-stack\nprovider:\n  type: opa\n  opa-spec:\n    rego: \"package lula\\n\\nimport future.keywords.if\\n\\n# IR-6: Incident Reporting\\n# Verifies the compliance-bridge Deployment is present and has at least 1\\n# ready replica, confirming the incident reporting and notification\\n# infrastructure is operational.\\n# The compliance-bridge dispatches Slack/PagerDuty alerts on:\\n#   - Critical ISO 42001 compliance failures (A.9.2 PII leak, SC-4 OPA down)\\n#   - Governance threshold violations above MANUAL_REVIEW threshold\\n#   - Audit workflow failures requiring ISSO/ISSM notification\\nvalidate if {\\n  input[\\\"compliance-bridge-deployment\\\"].status.readyReplicas >= 1\\n}\\n\"\n"

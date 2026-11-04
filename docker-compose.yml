@@ -1,0 +1,114 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+version: "3.8"
+
+services:
+  # OPA: Policy Engine
+  opa:
+    image: openpolicyagent/opa:latest-static
+    command:
+      - "run"
+      - "--server"
+      - "--log-level=info"
+      - "--addr=unix:///tmp/opa.sock"
+      - "--addr=:8181"
+      - "--authentication=token"
+      - "/policies"
+    volumes:
+      - ./policies:/policies
+      - opa_socket_vol:/tmp
+    ports:
+      # HIGH-01 FIX: Restrict OPA to localhost only — prevents unauthenticated
+      # access from external processes on the host. Inter-service communication
+      # within the Docker network uses the internal port directly (no host binding needed).
+      - "127.0.0.1:8181:8181"
+    healthcheck:
+      test: [ "CMD", "/opa", "check", "/policies" ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Gateway (Hybrid Server with NeMo) — immutable baked image
+  gateway:
+    build:
+      context: .
+      dockerfile: src/gateway/Dockerfile
+    command: [ "python", "src/gateway/server/hybrid_server.py" ]
+    ports:
+      # GHSA-4x3x-w2m3-8mfh: Restrict gateway host binding to localhost only.
+      - "127.0.0.1:8080:8080"
+    environment:
+      - PORT=8080
+      - OPA_URL=http://opa:8181/v1/data/trade/governance
+      - CAGE_TRUSTED_CLIENT_IDENTITIES=${CAGE_TRUSTED_CLIENT_IDENTITIES:-governed-financial-advisor.governance-stack.serviceaccount.identity.linkerd.cluster.local}
+      # Langfuse v3 native OTLP ingestion — no separate collector needed.
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://langfuse-web:3000/api/public/otel/v1/traces
+      - OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic ${LANGFUSE_BASIC_AUTH_B64}
+      # v0.1.0 REQUIRED: ControlRegistry regional compliance profile selector.
+      # Override in .env: CAGE_DEPLOYMENT_REGION=EU_ECB
+      # Supported values: US_FED | EU_ECB | APAC_MAS
+      - CAGE_DEPLOYMENT_REGION=${CAGE_DEPLOYMENT_REGION:-US_FED}
+    # No live src mount — image must be rebuilt on code change (Phase 6.2).
+    # HIGH-03 FIX: Use env_file instead of mounting .env as a volume. Mounting
+    # .env as a volume exposes all secrets to any process that can read the
+    # container filesystem; env_file injects only the declared env vars.
+    env_file:
+      - .env
+    volumes:
+      - opa_socket_vol:/tmp
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    depends_on:
+      opa:
+        condition: service_healthy
+
+  # Main Agent Service — immutable baked image
+  app:
+    build: .
+    ports:
+      - "127.0.0.1:3000:8080"
+    environment:
+      - GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT}
+      - GOOGLE_CLOUD_LOCATION=${GOOGLE_CLOUD_LOCATION:-us-central1}
+      - OPA_URL=http://opa:8181/v1/data/trade/governance
+      - OPA_AUTH_TOKEN=${OPA_AUTH_TOKEN:?OPA_AUTH_TOKEN must be set in the environment}
+      - MODEL_FAST=${MODEL_FAST:?MODEL_FAST must be set in the environment}
+      - MODEL_REASONING=${MODEL_REASONING:?MODEL_REASONING must be set in the environment}
+      - VLLM_FAST_API_BASE=http://vllm-fast:8000/v1
+      - GATEWAY_HOST=gateway
+      - GATEWAY_PORT=8080
+      # Langfuse v3 native OTLP ingestion — no separate collector needed.
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://langfuse-web:3000/api/public/otel/v1/traces
+      - OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic ${LANGFUSE_BASIC_AUTH_B64}
+      # v0.1.0 REQUIRED: must match the gateway service's CAGE_DEPLOYMENT_REGION.
+      - CAGE_DEPLOYMENT_REGION=${CAGE_DEPLOYMENT_REGION:-US_FED}
+    # No live src mount — image must be rebuilt on code change (Phase 6.2).
+    # HIGH-03 FIX: Use env_file instead of mounting .env as a volume. Mounting
+    # .env as a volume exposes all secrets to any process that can read the
+    # container filesystem; env_file injects only the declared env vars.
+    env_file:
+      - .env
+    volumes:
+      - opa_socket_vol:/tmp
+    depends_on:
+      gateway:
+        condition: service_started
+
+volumes:
+  opa_socket_vol:
