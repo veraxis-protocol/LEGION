@@ -134,6 +134,8 @@ jobs:
   marker-contract-check:
     name: "Pytest Marker Contract"
     runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: ${{ github.workspace }}/.ci/ztl-swarm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -148,6 +150,12 @@ jobs:
           python-version-file: "pyproject.toml"
       - name: Install Dependencies
         run: uv sync --all-groups --all-extras
+      - name: Install pinned ZTL Python rules
+        run: |
+          git clone https://github.com/inventor1975/ztl-swarm.git .ci/ztl-swarm
+          git -C .ci/ztl-swarm checkout --detach 7d2a8265926aecab9a838b09059bd106941b5c18
+          test "$(git -C .ci/ztl-swarm rev-parse HEAD)" = "7d2a8265926aecab9a838b09059bd106941b5c18"
+          PYTHONPATH="$GITHUB_WORKSPACE/.ci/ztl-swarm" uv run python -c "from ztlswarm.ztlrule import ZtlSwarm, LeanVerdict"
       - name: Verify every collected test carries a selection marker
         env:
           CAGE_ENV: "test"
@@ -168,6 +176,8 @@ jobs:
     # region (tests/fixtures/deployment_region.py), so no region matrix.
     name: "Pytest Logic Tests"
     runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: ${{ github.workspace }}/.ci/ztl-swarm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -182,6 +192,12 @@ jobs:
           python-version-file: "pyproject.toml"
       - name: Install Dependencies
         run: uv sync --all-groups --all-extras
+      - name: Install pinned ZTL Python rules
+        run: |
+          git clone https://github.com/inventor1975/ztl-swarm.git .ci/ztl-swarm
+          git -C .ci/ztl-swarm checkout --detach 7d2a8265926aecab9a838b09059bd106941b5c18
+          test "$(git -C .ci/ztl-swarm rev-parse HEAD)" = "7d2a8265926aecab9a838b09059bd106941b5c18"
+          PYTHONPATH="$GITHUB_WORKSPACE/.ci/ztl-swarm" uv run python -c "from ztlswarm.ztlrule import ZtlSwarm, LeanVerdict"
       - name: Run Pytest (unit/local)
         env:
           CAGE_ENV: "test"

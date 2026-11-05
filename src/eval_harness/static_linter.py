@@ -47,7 +47,7 @@ _PROHIBITION_LINE_RE = re.compile(
 )
 _SECRET_CANARY_RE = re.compile(
     r"(?:nvapi-[A-Za-z0-9_-]{8,}|sk-lf-[A-Za-z0-9_-]{8,}|pk-lf-[A-Za-z0-9_-]{8,}"
-    r"|hf_[A-Za-z0-9]{10,}|CANARY_SECRET_[A-Za-z0-9_-]+)",
+    r"|hf_[A-Za-z0-9]{10,}|CANARY_SECRET_[A-Za-z0-9_-]+|REDACTED_[A-Z0-9_]*TOKEN)",
     re.IGNORECASE,
 )
 _PROMPT_INJECTION_RE = re.compile(
