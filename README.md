@@ -14,7 +14,7 @@ The core execution boundary is:
 
 `mission → executable world → 100 registered agents / assigned active roles → causal controller → ZTL evidence/admissibility → CAGE and VEIP governance → native world tools → consequential state effects → receipts + independent readbacks → independent Judge`.
 
-The agents *propose* actions. The control and governance layers determine whether actions may be executed. The world adapter enacts eligible operations and produces evidence. The Judge decides whether the resulting collective mission satisfied all specified obligations. See execution boundaries and CAGE disclosure.
+The agents *propose* actions. The control and governance layers determine whether actions may be executed. The world adapter enacts eligible operations and produces evidence. The Judge decides whether the resulting collective mission satisfied all specified obligations. The consequential-action boundary and upstream CAGE attribution are described below.
 
 ```mermaid
 flowchart LR
@@ -33,6 +33,19 @@ flowchart LR
 ### Why 100 does not mean 100 NIM calls
 
 Each world registers 100 workers. Role assignment determines which workers actually pursue obligations. The public index shows between **2 and 12 actively assigned roles per world**. The system must report active agent contributions separately from registration counts; worker registration, model calls, coordination events and native effects are distinct measurements.
+
+## Where LEGION lives
+
+The repository root retains the inherited Google CAGE project layout. The LEGION-specific research implementation is concentrated in:
+
+- [`worlds/`](worlds/) — published world assets.
+- [`tests/legion_struct/`](tests/legion_struct/) — causal runtime, structural worlds, controller, adapters and tests.
+- [`tests/legion_scale/`](tests/legion_scale/) — coordination and scaling experiments.
+- [`tests/legion_mini/`](tests/legion_mini/) — reduced execution tests.
+- [`tests/legion_overlay/`](tests/legion_overlay/) — integration and governance overlays.
+- [`judge/`](judge/) — independent Judge, the runnable `judge/judge.sh` wrapper and the `judge/components/run_judge.py` Python entry point.
+
+The root CAGE `docker-compose.yml` and deployment scripts are **not** a stand-alone LEGION-100 mission launcher.
 
 ## Thirteen executable worlds
 
@@ -54,7 +67,7 @@ Names below describe *engineering analogues*, not claims of integration into nam
 | `SYN-OTEL-05` | Service Performance Assurance | 3 | Reduce recommendation latency and memory pressure; verify two windows without session loss |
 | `SYN-OTEL-06` | Autonomous AI Containment | 3 | Bound a runaway assistant's call rate while leaving unrelated services available |
 
-For each world, inspect its actual JSON under `worlds/`, obligation graph, assigned roles, event timing, adapter action set, permitted authority, expected effect and Judge specification. The 13 identifiers above are based on `STRUCTURAL_001/worlds_public/INDEX.json`, not inferred from run successes. Detailed reproducibility instructions are tracked in world specifications.
+The public world catalogue is [`tests/legion_struct/worlds/INDEX.json`](tests/legion_struct/worlds/INDEX.json). Individual definitions are in the same directory; the Judge and its schemas are in [`judge/components/judge_s1/`](judge/components/judge_s1/).
 
 ## Evidence and measured outcomes
 
@@ -75,32 +88,41 @@ by Veraxis and available on request; they are not included here.
 These results concern bounded GAIA2/OpenTelemetry-derived
 synthetic worlds, not an official GAIA2 benchmark score.
 
+### Video cross-reference (illustrative, not a controlled comparison)
+
+The accompanying film reports a **65.3% reduction** from **85,558 FAIL** to **29,707 PASS** for its ADA illustration. **Footnote:** one run per condition; reasoning differed; **not** a matched, controlled benchmark and **not** the LEGION-100 VCC@1 result. These figures are film-reported and are not independently evidenced by the WO050/WO059 Judge bundles here.
+
 ## Architecture and formal boundary
 
 - **Causal controller:** Tracks prerequisite obligations and state transitions. Agent self-report does not close an obligation without the required evidence.
 - **ZTL:** Evidence/admissibility logic. Earlier source pins identify `inventor1975/ztl-swarm` at `7d2a8265926aecab9a838b09059bd106941b5c18` using its **Python rule**, not a compiled Lean `zverdict`. Separately proved Lean theorems in the broader ZTL work should not be represented as proofs of end-to-end LEGION runtime execution.
-- **Google CAGE:** An upstream Apache-2.0 governance engine; in tested configurations it provides gateway/governor, warrant and evidence machinery. LEGION adds adapters and task-specific control. Attribution and execution-scoped limitations: CAGE disclosure.
+- **Google CAGE:** An upstream Apache-2.0 governance engine; in tested configurations it provides gateway/governor, warrant and evidence machinery. LEGION adds adapters and task-specific control. The attribution and test-only execution limits are noted in this section and in [license scope](LICENSE-SCOPE.md).
 - **VEIP:** Admissibility and warrant/authority elements. Earlier preflight used **test-only** authority roots. Test fixture authority is not production authority.
 - **Native adapters:** Implement side effects in the 13 controlled worlds; must preserve idempotency, deadlines, obligation dependencies and receipt/readback joins.
 - **Independent Judge:** Reads execution artifacts and validates mission obligations independently of proposing agents and causal controller. Mock permissive checks are not a substitute.
 
+**Formal-methods provenance:** LEGION integrates ZTL evidence/admissibility mechanisms, but this repository does not ship Lean `.lean` files or establish a Lean proof of the entire LEGION runtime. Lean source and formal theorems are maintained separately at [inventor1975/ZTL](https://github.com/inventor1975/ZTL). The LEGION experiment described here used a Python rule at its pinned source revision.
+
 ## NVIDIA NIM and runtime configuration
 
-Successful-experiment model recorded in the WO: `nvidia/nemotron-3.5-lightning-30b-a3b`. Earlier source pins reference `https://integrate.api.nvidia.com/v1`, with `enable_thinking=false`. Credentials must be provided via environment variables, never committed. Exact runtime values for temperature, token budget, concurrency, 429 retries, transport timeouts, causal park deadlines, global rate controls and maximum semantic turns must be extracted from the *frozen* runner/config, not guessed. See NIM integration.
+LEGION experiments have used NVIDIA NIM and the model identifier `nvidia/nemotron-3.5-lightning-30b-a3b`. The tested execution configuration is version-specific; the public DEV Judge smoke test above does not require NIM, a model API, or secrets. Credentials must never be committed to this repository.
 
-## Quick start / reproducibility
+## Quick start: run the independent Judge
 
-**Do not use upstream CAGE's root README or `docker-compose.yml` as LEGION's complete installation instructions.** The source snapshot was captured from a CAGE-based development tree; the release candidate requires a verified LEGION-specific entry point. The following non-mutating commands are valid source inspection steps, **not proof of a runnable mission**:
+Clone the repository. Python 3.10+ is required for the standard-library Judge; no model credentials, NIM calls, or live services are required for this sample.
+
+From the repository root on Linux, macOS, or WSL:
 
 ```bash
-python3 --version
-find . -maxdepth 3 -name 'pyproject.toml' -o -name 'uv.lock' -o -name 'requirements*.txt'
-find . -type f \( -name 'JUDGE_RESULT.json' -o -name 'WORLD_RESULT.json' -o -name 'WORLD_LOG.jsonl' \)
-find . -type f -name '*.lean' | sort
-sha256sum -c SOURCE_FILES_SHA256.txt
+python3 -I judge/components/run_judge.py judge/components/judge_s1 evaluate judge/components/judge_s1/fixtures/DEV/SYN-GAIA-EXE --out /tmp/legion-dev-verdict.json
+python3 -c 'import json; print(json.load(open("/tmp/legion-dev-verdict.json"))["verdict"])'
 ```
 
-WO059 independently replayed all 13 historical missions. Public evidence distribution, clean-room reproduction and documented mission/NIM commands remain separate release tasks. The pinned lockfiles and supported Python/WSL versions, required environment keys, synthetic fixture setup and exact CLI routes will be documented against an actual clean execution. Do not substitute mock data or fabricated CLI commands.
+Expected result: `PASS` and process exit code `0`. On Windows PowerShell, use `python` in place of `python3` and a Windows path for `--out` (for example, `dev-verdict.json`).
+
+**What this proves:** The published deterministic reference Judge accepts the bundled **synthetic DEV fixture**. It is not a WO050 production mission, not WO059's 13/13 historical replay, and not proof that 100 live agents were run by this command. The historical WO050 evidence bundles are retained by Veraxis and are available on request; public third-party reproduction of all 13 remains pending.
+
+To inspect all 13 public structural world definitions, see [`tests/legion_struct/worlds/INDEX.json`](tests/legion_struct/worlds/INDEX.json). This repository does not contain local Lean proof sources; the upstream formal logic research is maintained separately in [ZTL](https://github.com/inventor1975/ZTL).
 
 ## Licenses and provenance
 
@@ -110,7 +132,7 @@ This repository is **published** as a functional development snapshot, not a pro
 
 ## Submission and engineering context
 
-LEGION-100 addresses the Meta Global AI Developer Hackathon's **Push the Frontier** theme: giving a collective of agentic systems a new capability—controlled, attributable execution with independently adjudicated consequences. Earlier provenance records identify Meta Muse through Claude Code CLI as a code-producing tool for a development stage. Declare that provenance accurately where hackathon rules require it; neither Meta nor Google independently evaluated the claimed result.
+LEGION-100 addresses the Meta Global AI Developer Hackathon's **Push the Frontier** theme: giving a collective of agentic systems a new capability—controlled, attributable execution with independently adjudicated consequences. Development-stage source provenance includes Meta Muse operated through Claude Code CLI. Neither Meta nor Google independently evaluated the reported LEGION-100 result.
 
 ---
 
