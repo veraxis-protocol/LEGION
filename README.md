@@ -4,7 +4,7 @@
 
 > Intelligence is abundant. Control over consequence is scarce.
 
-**Release status:** publicly published functional development snapshot (WO057). Licensing policy is confirmed; file-level provenance review and independent clean-clone verification remain open. LEGION-100 is a source-available Veraxis research implementation. The repository documents 100 registered agents operating across 13 bounded, executable state-machine worlds. Seven world structures were developed from GAIA2 scenario categories and six from OpenTelemetry Astronomy Shop operational patterns. This is not a claim that any synthetic world reproduces all conditions of a production enterprise system.
+**Release status:** publicly published functional development snapshot (WO057). Licensing policy is confirmed; file-level provenance review and public clean-room reproduction remain open. LEGION-100 is a source-available Veraxis research implementation. The repository documents 100 registered agents operating across 13 bounded, executable state-machine worlds. Seven world structures were developed from GAIA2 scenario categories and six from OpenTelemetry Astronomy Shop operational patterns. This is not a claim that any synthetic world reproduces all conditions of a production enterprise system.
 
 LEGION's central question is not whether 100 agents can exchange messages. It is whether a collective can satisfy **causal obligations**, admit consequential actions under verifiable authority, produce actual state changes, preserve receipts and readbacks, and earn completion from an **independent Judge**.
 
@@ -14,7 +14,7 @@ The core execution boundary is:
 
 `mission → executable world → 100 registered agents / assigned active roles → causal controller → ZTL evidence/admissibility → CAGE and VEIP governance → native world tools → consequential state effects → receipts + independent readbacks → independent Judge`.
 
-The agents *propose* actions. The control and governance layers determine whether actions may be executed. The world adapter enacts eligible operations and produces evidence. The Judge decides whether the resulting collective mission satisfied all specified obligations. See [Execution boundaries](docs/architecture/EXECUTION_BOUNDARIES.md) and [CAGE disclosure](docs/governance/CAGE_DISCLOSURE.md).
+The agents *propose* actions. The control and governance layers determine whether actions may be executed. The world adapter enacts eligible operations and produces evidence. The Judge decides whether the resulting collective mission satisfied all specified obligations. See execution boundaries and CAGE disclosure.
 
 ```mermaid
 flowchart LR
@@ -54,31 +54,39 @@ Names below describe *engineering analogues*, not claims of integration into nam
 | `SYN-OTEL-05` | Service Performance Assurance | 3 | Reduce recommendation latency and memory pressure; verify two windows without session loss |
 | `SYN-OTEL-06` | Autonomous AI Containment | 3 | Bound a runaway assistant's call rate while leaving unrelated services available |
 
-For each world, inspect its actual JSON under `worlds/`, obligation graph, assigned roles, event timing, adapter action set, permitted authority, expected effect and Judge specification. The 13 identifiers above are based on `STRUCTURAL_001/worlds_public/INDEX.json`, not inferred from run successes. Detailed reproducibility instructions are tracked in [world specifications](docs/worlds/WORLD_METHOD.md).
+For each world, inspect its actual JSON under `worlds/`, obligation graph, assigned roles, event timing, adapter action set, permitted authority, expected effect and Judge specification. The 13 identifiers above are based on `STRUCTURAL_001/worlds_public/INDEX.json`, not inferred from run successes. Detailed reproducibility instructions are tracked in world specifications.
 
 ## Evidence and measured outcomes
 
-### Two distinct result populations
+**WO050: 13/13 PASS.** Unified frozen-source campaign;
+100 registered workers per structural world.
 
-1. **Historical local Judge PASS candidates — 13/13.** `CODEX_WO_LEGION100_GO_001/WO043R_FREEZE/MANIFEST_FINAL.json` lists 13 primary evidence records with file SHA-256, stage and source references. These passes occurred across **different development versions**.
-2. **Unified frozen source campaign — latest ledger examined 11 PASS / 13 attempts** (2026-11-04 read of `WO044_UNIFIED/UNIFIED_LEDGER.json`). The two failing worlds in that ledger are `SYN-GAIA-ADA` and `SYN-OTEL-05`; all 13 records report frozen source SHA-256 `ddfb7731bc845382d28b2d2450bfc21a09aa2800ef23c47ced70b7e7af65720e`. This is an observed ledger snapshot, not a statement about subsequent runs.
+**WO059: 13/13 PASS.** Independent Judge replay of original
+native evidence, without using historical Judge verdicts.
 
-**Official VCC@1 13/13 qualification: Z (not established by these materials).** Historical local passes are not substituted for an independently reproduced, single-version, first-attempt cohort. Negative results, refused actions, lost receipts and incomplete obligations must remain in the evidence history. See [Evaluation contract](docs/evaluation/VCC_AT_1.md).
+**WO060: 2/2 PASS.** Negative controls detected an evidence
+hash mismatch and a causal dependency violation.
 
-No token/cost reduction percentage, production maturity, or formal certification is claimed without corresponding primary measurements.
+See [WO059 replay and WO060 controls](docs/WO059_INDEPENDENT_REPLAY.md).
+
+**Public reproducibility: PENDING.** Evidence bundles are retained
+by Veraxis and available on request; they are not included here.
+
+These results concern bounded GAIA2/OpenTelemetry-derived
+synthetic worlds, not an official GAIA2 benchmark score.
 
 ## Architecture and formal boundary
 
 - **Causal controller:** Tracks prerequisite obligations and state transitions. Agent self-report does not close an obligation without the required evidence.
 - **ZTL:** Evidence/admissibility logic. Earlier source pins identify `inventor1975/ztl-swarm` at `7d2a8265926aecab9a838b09059bd106941b5c18` using its **Python rule**, not a compiled Lean `zverdict`. Separately proved Lean theorems in the broader ZTL work should not be represented as proofs of end-to-end LEGION runtime execution.
-- **Google CAGE:** An upstream Apache-2.0 governance engine; in tested configurations it provides gateway/governor, warrant and evidence machinery. LEGION adds adapters and task-specific control. Attribution and execution-scoped limitations: [CAGE disclosure](docs/governance/CAGE_DISCLOSURE.md).
+- **Google CAGE:** An upstream Apache-2.0 governance engine; in tested configurations it provides gateway/governor, warrant and evidence machinery. LEGION adds adapters and task-specific control. Attribution and execution-scoped limitations: CAGE disclosure.
 - **VEIP:** Admissibility and warrant/authority elements. Earlier preflight used **test-only** authority roots. Test fixture authority is not production authority.
 - **Native adapters:** Implement side effects in the 13 controlled worlds; must preserve idempotency, deadlines, obligation dependencies and receipt/readback joins.
 - **Independent Judge:** Reads execution artifacts and validates mission obligations independently of proposing agents and causal controller. Mock permissive checks are not a substitute.
 
 ## NVIDIA NIM and runtime configuration
 
-Successful-experiment model recorded in the WO: `nvidia/nemotron-3.5-lightning-30b-a3b`. Earlier source pins reference `https://integrate.api.nvidia.com/v1`, with `enable_thinking=false`. Credentials must be provided via environment variables, never committed. Exact runtime values for temperature, token budget, concurrency, 429 retries, transport timeouts, causal park deadlines, global rate controls and maximum semantic turns must be extracted from the *frozen* runner/config, not guessed. See [NIM integration](docs/architecture/NIM_AND_RUNTIME.md).
+Successful-experiment model recorded in the WO: `nvidia/nemotron-3.5-lightning-30b-a3b`. Earlier source pins reference `https://integrate.api.nvidia.com/v1`, with `enable_thinking=false`. Credentials must be provided via environment variables, never committed. Exact runtime values for temperature, token budget, concurrency, 429 retries, transport timeouts, causal park deadlines, global rate controls and maximum semantic turns must be extracted from the *frozen* runner/config, not guessed. See NIM integration.
 
 ## Quick start / reproducibility
 
@@ -92,13 +100,13 @@ find . -type f -name '*.lean' | sort
 sha256sum -c SOURCE_FILES_SHA256.txt
 ```
 
-Complete installation, `--world`, `--all-13`, judge replay and NIM diagnostic commands are **release blockers** until verified using the packaged kernel. The pinned lockfiles and supported Python/WSL versions, required environment keys, synthetic fixture setup and exact CLI routes will be documented against an actual clean execution. Do not substitute mock data or fabricated CLI commands.
+WO059 independently replayed all 13 historical missions. Public evidence distribution, clean-room reproduction and documented mission/NIM commands remain separate release tasks. The pinned lockfiles and supported Python/WSL versions, required environment keys, synthetic fixture setup and exact CLI routes will be documented against an actual clean execution. Do not substitute mock data or fabricated CLI commands.
 
 ## Licenses and provenance
 
 LEGION original content: **PolyForm Noncommercial 1.0.0** (source-available; not an OSI open-source license). Google CAGE upstream source: **Apache-2.0**. Other components retain their applicable licenses. These are separate obligations: [license scope](LICENSE-SCOPE.md), [third-party notices](THIRD_PARTY_NOTICES.md), [NOTICE](NOTICE). Google did not develop or certify LEGION-100; CAGE is not an officially supported Google product.
 
-This repository is **published** as a functional development snapshot, not a production-certified release. File-level license review, dependency closure, clean installation and independent Judge replay remain open acceptance gates.
+This repository is **published** as a functional development snapshot, not a production-certified release. WO059 independent Judge replay and WO060 negative controls are PASS. File-level provenance review and public reproduction remain open.
 
 ## Submission and engineering context
 

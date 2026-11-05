@@ -1,4 +1,4 @@
-﻿# LEGION-100: Independent Judge Replay — WO059
+# LEGION-100: Independent Judge Replay — WO059
 
 ## Verified result
 
@@ -25,15 +25,23 @@ Historical JUDGE_RESULT.json files were not supplied to the evaluator.
 
 All 13 replay verdicts were PASS. The process exited with code 0.
 
-## Primary evidence
+## Evidence availability
 
-Windows/Dropbox:
+Original WO050 native evidence, the 13 reconstructed Judge
+bundles and WO059 verdicts are retained by Veraxis.
 
-`L1/LEGION_100/WO059_WINDOWS_ACCEPTANCE_20261104_195405/REPLAY_CORRECTED/`
+**Available on request.** The evidence bundles are not
+included in this public repository.
 
-Original campaign:
+Independent Judge replay completed successfully; third-party
+reproduction from publicly distributed evidence remains pending.
 
-`L1/LEGION_100/CODEX_WO_LEGION100_GO_001/WO050_UNIFIED/`
+## WO060 negative controls
+
+- N1: INVALID_TEST / HASH_OR_FILE_INTEGRITY_FAILURE.
+- N2: FAIL / DEPENDENCY_ORDER_VIOLATION.
+- Original 13 evidence bundles unchanged.
+- Result: 2/2 PASS.
 
 ## Scope and limitations
 
