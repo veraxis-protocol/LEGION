@@ -4,7 +4,7 @@
 
 > Intelligence is abundant. Control over consequence is scarce.
 
-**Release status:** engineering release candidate; **not yet authorized for publication**. LEGION-100 is a source-available Veraxis research implementation. The repository documents 100 registered agents operating across 13 bounded, executable state-machine worlds. Seven world structures were developed from GAIA2 scenario categories and six from OpenTelemetry Astronomy Shop operational patterns. This is not a claim that any synthetic world reproduces all conditions of a production enterprise system.
+**Release status:** publicly published functional development snapshot (WO057). Licensing policy is confirmed; file-level provenance review and independent clean-clone verification remain open. LEGION-100 is a source-available Veraxis research implementation. The repository documents 100 registered agents operating across 13 bounded, executable state-machine worlds. Seven world structures were developed from GAIA2 scenario categories and six from OpenTelemetry Astronomy Shop operational patterns. This is not a claim that any synthetic world reproduces all conditions of a production enterprise system.
 
 LEGION's central question is not whether 100 agents can exchange messages. It is whether a collective can satisfy **causal obligations**, admit consequential actions under verifiable authority, produce actual state changes, preserve receipts and readbacks, and earn completion from an **independent Judge**.
 
@@ -96,9 +96,9 @@ Complete installation, `--world`, `--all-13`, judge replay and NIM diagnostic co
 
 ## Licenses and provenance
 
-LEGION original content: **PolyForm Noncommercial 1.0.0** (source-available; not an OSI open-source license). Google CAGE upstream source: **Apache-2.0**. Other components retain their applicable licenses. These are separate obligations: [license scope](LICENSE-SCOPE.md), [third-party clearance](legal/THIRD_PARTY_COMPLIANCE.md), [NOTICE](NOTICE). Google did not develop or certify LEGION-100; CAGE is not an officially supported Google product.
+LEGION original content: **PolyForm Noncommercial 1.0.0** (source-available; not an OSI open-source license). Google CAGE upstream source: **Apache-2.0**. Other components retain their applicable licenses. These are separate obligations: [license scope](LICENSE-SCOPE.md), [third-party notices](THIRD_PARTY_NOTICES.md), [NOTICE](NOTICE). Google did not develop or certify LEGION-100; CAGE is not an officially supported Google product.
 
-The repo is a release **candidate** until copyright clearance, exact dependency inventory, all 13 per-world CAGE source pins, secret scan, clean installation and independent replay pass. This README does not assert publication authorization.
+This repository is **published** as a functional development snapshot, not a production-certified release. File-level license review, dependency closure, clean installation and independent Judge replay remain open acceptance gates.
 
 ## Submission and engineering context
 
@@ -106,4 +106,4 @@ LEGION-100 addresses the Meta Global AI Developer Hackathon's **Push the Frontie
 
 ---
 
-Maintainer: Veraxis. License scope and claims refer to this candidate only; the exact GitHub published tree may differ after security, provenance and reproducibility gates.
+Maintainer: Veraxis. The published source snapshot is version-specific; claims must be evaluated against the corresponding manifest and reproducible execution evidence.
