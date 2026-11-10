@@ -137,3 +137,14 @@ LEGION-100 addresses the Meta Global AI Developer Hackathon's **Push the Frontie
 ---
 
 Maintainer: Veraxis. The published source snapshot is version-specific; claims must be evaluated against the corresponding manifest and reproducible execution evidence.
+
+## Related repositories
+
+| Repository | Role | License |
+|---|---|---|
+| [LEGION Deal Rescue](https://github.com/veraxis-protocol/LEGION-Deal-Rescue) | Merchant application built on this stack: seven-party deals, independent Judge, PayPal Sandbox payments | Apache-2.0 |
+| [LEGION](https://github.com/veraxis-protocol/LEGION) | LEGION Core runtime: worlds, admission, independent Judge | PolyForm Noncommercial 1.0.0 |
+| [LEGION-Formal-Core](https://github.com/veraxis-protocol/LEGION-Formal-Core) | Lean 4 model of single-collective admission and completion | PolyForm Noncommercial 1.0.0 |
+| [LEGION-Federation](https://github.com/veraxis-protocol/LEGION-Federation) | Independent owners' collectives: disclosure policy, signed commitments, multi-party contracts | PolyForm Noncommercial 1.0.0 |
+| [LEGION-Marketplace](https://github.com/veraxis-protocol/LEGION-Marketplace) | Intent publication, discovery, end-to-end harness | PolyForm Noncommercial 1.0.0 |
+| [LEGION-Commerce](https://github.com/veraxis-protocol/LEGION-Commerce) | PayPal Sandbox adapter, admission bridge, payment orchestration | no license file |
