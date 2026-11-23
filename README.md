@@ -1,3 +1,5 @@
+[![M8ven Score](https://m8ven.ai/badge/mcp/veraxis-protocol/legion)](https://m8ven.ai/mcp/veraxis-protocol/legion?s=readme)
+
 # LEGION-100
 
 **Verified multi-agent execution infrastructure for consequential tasks**
